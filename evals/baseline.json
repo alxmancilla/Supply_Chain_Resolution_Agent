@@ -1,0 +1,717 @@
+{
+  "mode": "live",
+  "metrics": [
+    {
+      "name": "intent_accuracy",
+      "dataset": "/Users/mancilla/sw/Supply_Chain_Resolution_Agent/evals/datasets/intents.jsonl",
+      "n": 20,
+      "passed": 20,
+      "score": 1.0,
+      "extras": {
+        "confusion": {
+          "recommend_shipment": {
+            "recommend_shipment": 3
+          },
+          "recall_preference": {
+            "recall_preference": 3
+          },
+          "recall_episode": {
+            "recall_episode": 3
+          },
+          "lookup_policy": {
+            "lookup_policy": 3
+          },
+          "structured_lookup": {
+            "structured_lookup": 3
+          },
+          "list_rules": {
+            "list_rules": 3
+          },
+          "fallback": {
+            "fallback": 2
+          }
+        }
+      },
+      "cases": [
+        {
+          "case_id": "int_01",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recommend_shipment",
+          "actual": "recommend_shipment",
+          "notes": "heuristic match: /\\b(ship|shipment|recommend|book|plan|mov.../"
+        },
+        {
+          "case_id": "int_02",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recommend_shipment",
+          "actual": "recommend_shipment",
+          "notes": "heuristic match: /\\b(ship|shipment|recommend|book|plan|mov.../"
+        },
+        {
+          "case_id": "int_03",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recommend_shipment",
+          "actual": "recommend_shipment",
+          "notes": "heuristic match: /\\b(ship|shipment|recommend|book|plan|mov.../"
+        },
+        {
+          "case_id": "int_04",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recall_preference",
+          "actual": "recall_preference",
+          "notes": "heuristic match: /\\b(what carrier|which carrier|did i (pre.../"
+        },
+        {
+          "case_id": "int_05",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recall_preference",
+          "actual": "recall_preference",
+          "notes": "heuristic match: /\\b(what carrier|which carrier|did i (pre.../"
+        },
+        {
+          "case_id": "int_06",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recall_preference",
+          "actual": "recall_preference",
+          "notes": "heuristic match: /\\b(what carrier|which carrier|did i (pre.../"
+        },
+        {
+          "case_id": "int_07",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recall_episode",
+          "actual": "recall_episode",
+          "notes": "heuristic match: /\\b(past shipment|previous shipment|prior.../"
+        },
+        {
+          "case_id": "int_08",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recall_episode",
+          "actual": "recall_episode",
+          "notes": "heuristic match: /\\b(past shipment|previous shipment|prior.../"
+        },
+        {
+          "case_id": "int_09",
+          "passed": true,
+          "score": 1.0,
+          "expected": "recall_episode",
+          "actual": "recall_episode",
+          "notes": "heuristic match: /\\b(past shipment|previous shipment|prior.../"
+        },
+        {
+          "case_id": "int_10",
+          "passed": true,
+          "score": 1.0,
+          "expected": "lookup_policy",
+          "actual": "lookup_policy",
+          "notes": "heuristic match: /\\b(policy|policies|sla|surcharge|route g.../"
+        },
+        {
+          "case_id": "int_11",
+          "passed": true,
+          "score": 1.0,
+          "expected": "lookup_policy",
+          "actual": "lookup_policy",
+          "notes": "heuristic match: /\\b(policy|policies|sla|surcharge|route g.../"
+        },
+        {
+          "case_id": "int_12",
+          "passed": true,
+          "score": 1.0,
+          "expected": "lookup_policy",
+          "actual": "lookup_policy",
+          "notes": "heuristic match: /\\b(policy|policies|sla|surcharge|route g.../"
+        },
+        {
+          "case_id": "int_13",
+          "passed": true,
+          "score": 1.0,
+          "expected": "structured_lookup",
+          "actual": "structured_lookup",
+          "notes": "heuristic match: /\\b(which|what|list).{0,40}\\b(carriers?|l.../"
+        },
+        {
+          "case_id": "int_14",
+          "passed": true,
+          "score": 1.0,
+          "expected": "structured_lookup",
+          "actual": "structured_lookup",
+          "notes": "heuristic match: /\\b(which|what|list).{0,40}\\b(carriers?|l.../"
+        },
+        {
+          "case_id": "int_15",
+          "passed": true,
+          "score": 1.0,
+          "expected": "structured_lookup",
+          "actual": "structured_lookup",
+          "notes": "heuristic match: /\\b(which|what|list).{0,40}\\b(carriers?|l.../"
+        },
+        {
+          "case_id": "int_16",
+          "passed": true,
+          "score": 1.0,
+          "expected": "list_rules",
+          "actual": "list_rules",
+          "notes": "heuristic match: /\\b(operating (rule|rules|procedures)|(wh.../"
+        },
+        {
+          "case_id": "int_17",
+          "passed": true,
+          "score": 1.0,
+          "expected": "list_rules",
+          "actual": "list_rules",
+          "notes": "heuristic match: /\\b(operating (rule|rules|procedures)|(wh.../"
+        },
+        {
+          "case_id": "int_18",
+          "passed": true,
+          "score": 1.0,
+          "expected": "list_rules",
+          "actual": "list_rules",
+          "notes": "heuristic match: /\\b(operating (rule|rules|procedures)|(wh.../"
+        },
+        {
+          "case_id": "int_19",
+          "passed": true,
+          "score": 1.0,
+          "expected": "fallback",
+          "actual": "fallback",
+          "notes": "Greeting without actionable supply chain intent"
+        },
+        {
+          "case_id": "int_20",
+          "passed": true,
+          "score": 1.0,
+          "expected": "fallback",
+          "actual": "fallback",
+          "notes": "Unclear user intent"
+        }
+      ]
+    },
+    {
+      "name": "rag_recall_at_k",
+      "dataset": "/Users/mancilla/sw/Supply_Chain_Resolution_Agent/evals/datasets/rag_retrieval.jsonl",
+      "n": 13,
+      "passed": 13,
+      "score": 1.0,
+      "extras": {
+        "mean_recall": 1.0
+      },
+      "cases": [
+        {
+          "case_id": "rag_01",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "carrier_agreements/carrier_a_2026.pdf",
+            "route_guides/tx_tx_lane.pdf"
+          ],
+          "actual": [
+            "carrier_agreements/carrier_a_2026.pdf",
+            "route_guides/tx_tx_lane.pdf",
+            "carrier_agreements/carrier_b_2026.pdf",
+            "route_guides/tx_az_lane.pdf",
+            "policies/hours_of_service.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_02",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "carrier_agreements/carrier_a_2026.pdf",
+            "route_guides/tx_az_lane.pdf"
+          ],
+          "actual": [
+            "carrier_agreements/carrier_a_2026.pdf",
+            "route_guides/tx_az_lane.pdf",
+            "route_guides/tx_tx_lane.pdf",
+            "carrier_agreements/carrier_b_2026.pdf",
+            "carrier_agreements/carrier_a_2026.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_03",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "carrier_agreements/carrier_b_2026.pdf"
+          ],
+          "actual": [
+            "carrier_agreements/carrier_b_2026.pdf",
+            "route_guides/tx_ca_lane.pdf",
+            "route_guides/tx_az_lane.pdf",
+            "policies/approval_thresholds.pdf",
+            "carrier_agreements/carrier_b_2026.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_04",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "playbooks/late_delivery.pdf"
+          ],
+          "actual": [
+            "playbooks/late_delivery.pdf",
+            "playbooks/late_delivery.pdf",
+            "playbooks/late_delivery.pdf",
+            "playbooks/late_delivery.pdf",
+            "playbooks/carrier_no_show.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_05",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "carrier_agreements/carrier_a_2026.pdf",
+            "playbooks/damaged_goods.pdf"
+          ],
+          "actual": [
+            "playbooks/damaged_goods.pdf",
+            "carrier_agreements/carrier_a_2026.pdf",
+            "carrier_agreements/carrier_b_2026.pdf",
+            "policies/claims_and_insurance.pdf",
+            "playbooks/damaged_goods.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_06",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "carrier_agreements/carrier_b_2026.pdf",
+            "playbooks/weight_discrepancy.pdf"
+          ],
+          "actual": [
+            "playbooks/weight_discrepancy.pdf",
+            "playbooks/weight_discrepancy.pdf",
+            "playbooks/weight_discrepancy.pdf",
+            "playbooks/weight_discrepancy.pdf",
+            "carrier_agreements/carrier_b_2026.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_07",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "policies/approval_thresholds.pdf"
+          ],
+          "actual": [
+            "policies/approval_thresholds.pdf",
+            "policies/approval_thresholds.pdf",
+            "playbooks/carrier_no_show.pdf",
+            "policies/approval_thresholds.pdf",
+            "policies/approval_thresholds.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_08",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "route_guides/tx_ca_lane.pdf"
+          ],
+          "actual": [
+            "policies/hours_of_service.pdf",
+            "carrier_agreements/carrier_a_2026.pdf",
+            "carrier_agreements/carrier_b_2026.pdf",
+            "route_guides/az_ca_lane.pdf",
+            "route_guides/tx_ca_lane.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_09",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "carrier_agreements/carrier_c_2026.pdf",
+            "route_guides/az_ca_lane.pdf"
+          ],
+          "actual": [
+            "carrier_agreements/carrier_c_2026.pdf",
+            "route_guides/az_ca_lane.pdf",
+            "route_guides/az_ca_lane.pdf",
+            "policies/hours_of_service.pdf",
+            "route_guides/az_ca_lane.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_10",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "playbooks/carrier_no_show.pdf"
+          ],
+          "actual": [
+            "playbooks/carrier_no_show.pdf",
+            "playbooks/carrier_no_show.pdf",
+            "playbooks/carrier_no_show.pdf",
+            "playbooks/carrier_no_show.pdf",
+            "playbooks/late_delivery.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_11",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "policies/freight_guidelines_appointments.pdf"
+          ],
+          "actual": [
+            "policies/freight_guidelines_appointments.pdf",
+            "policies/freight_guidelines_appointments.pdf",
+            "carrier_agreements/carrier_b_2026.pdf",
+            "route_guides/tx_ca_lane.pdf",
+            "policies/hours_of_service.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_12",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "policies/vendor_list.pdf"
+          ],
+          "actual": [
+            "policies/vendor_list.pdf",
+            "policies/vendor_list.pdf",
+            "policies/vendor_list.pdf",
+            "carrier_agreements/carrier_b_2026.pdf",
+            "carrier_agreements/carrier_a_2026.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        },
+        {
+          "case_id": "rag_13",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            "policies/hours_of_service.pdf"
+          ],
+          "actual": [
+            "policies/hours_of_service.pdf",
+            "policies/hours_of_service.pdf",
+            "policies/hours_of_service.pdf",
+            "route_guides/tx_ca_lane.pdf",
+            "policies/hours_of_service.pdf"
+          ],
+          "notes": "recall=1.00 k=5"
+        }
+      ]
+    },
+    {
+      "name": "kg_row_match",
+      "dataset": "/Users/mancilla/sw/Supply_Chain_Resolution_Agent/evals/datasets/kg_multi_constraint.jsonl",
+      "n": 6,
+      "passed": 6,
+      "score": 1.0,
+      "extras": {
+        "mean_row_recall": 1.0
+      },
+      "cases": [
+        {
+          "case_id": "kg_01",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 1
+            }
+          ],
+          "actual": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 2
+            }
+          ],
+          "notes": "row_recall=1.00 extracted_lanes=['TX-AZ']"
+        },
+        {
+          "case_id": "kg_02",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 1
+            }
+          ],
+          "actual": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 2
+            }
+          ],
+          "notes": "row_recall=1.00 extracted_lanes=['TX-TX']"
+        },
+        {
+          "case_id": "kg_03",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 1
+            }
+          ],
+          "actual": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_b",
+              "lane_id": "TX-NM",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_b",
+              "lane_id": "TX-AZ",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_c",
+              "lane_id": "TX-NM",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_c",
+              "lane_id": "TX-AZ",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 2
+            },
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 2
+            }
+          ],
+          "notes": "row_recall=1.00 extracted_lanes=[]"
+        },
+        {
+          "case_id": "kg_04",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            {
+              "carrier_id": "carrier_b",
+              "lane_id": "TX-NM",
+              "hop": 1
+            }
+          ],
+          "actual": [
+            {
+              "carrier_id": "carrier_b",
+              "lane_id": "TX-NM",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_b",
+              "lane_id": "TX-AZ",
+              "hop": 2
+            }
+          ],
+          "notes": "row_recall=1.00 extracted_lanes=['TX-NM']"
+        },
+        {
+          "case_id": "kg_05",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 1
+            }
+          ],
+          "actual": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 2
+            }
+          ],
+          "notes": "row_recall=1.00 extracted_lanes=['TX-TX']"
+        },
+        {
+          "case_id": "kg_06",
+          "passed": true,
+          "score": 1.0,
+          "expected": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 1
+            }
+          ],
+          "actual": [
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-AZ",
+              "hop": 1
+            },
+            {
+              "carrier_id": "carrier_a",
+              "lane_id": "TX-TX",
+              "hop": 2
+            }
+          ],
+          "notes": "row_recall=1.00 extracted_lanes=['TX-AZ']"
+        }
+      ]
+    },
+    {
+      "name": "action_planning_accuracy",
+      "dataset": "/Users/mancilla/sw/Supply_Chain_Resolution_Agent/evals/datasets/action_planning.jsonl",
+      "n": 6,
+      "passed": 6,
+      "score": 1.0,
+      "extras": {
+        "approval_accuracy": 1.0
+      },
+      "cases": [
+        {
+          "case_id": "low_cost_tx_tx_carrier_a",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "action_type": "create_booking_draft",
+            "requires_approval": false
+          },
+          "actual": {
+            "action_type": "create_booking_draft",
+            "requires_approval": false
+          },
+          "notes": "action_ok=True approval_ok=True"
+        },
+        {
+          "case_id": "low_cost_tx_az_carrier_a",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "action_type": "create_booking_draft",
+            "requires_approval": false
+          },
+          "actual": {
+            "action_type": "create_booking_draft",
+            "requires_approval": false
+          },
+          "notes": "action_ok=True approval_ok=True"
+        },
+        {
+          "case_id": "high_cost_tx_ca_team_driver",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "action_type": "create_booking_draft",
+            "requires_approval": true
+          },
+          "actual": {
+            "action_type": "create_booking_draft",
+            "requires_approval": true
+          },
+          "notes": "action_ok=True approval_ok=True"
+        },
+        {
+          "case_id": "high_cost_explicit_token",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "action_type": "create_booking_draft",
+            "requires_approval": true
+          },
+          "actual": {
+            "action_type": "create_booking_draft",
+            "requires_approval": true
+          },
+          "notes": "action_ok=True approval_ok=True"
+        },
+        {
+          "case_id": "no_action_recall_preference",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "action_type": "none",
+            "requires_approval": false
+          },
+          "actual": {
+            "action_type": "none",
+            "requires_approval": false
+          },
+          "notes": "action_ok=True approval_ok=True"
+        },
+        {
+          "case_id": "no_action_policy_lookup",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "action_type": "none",
+            "requires_approval": false
+          },
+          "actual": {
+            "action_type": "none",
+            "requires_approval": false
+          },
+          "notes": "action_ok=True approval_ok=True"
+        }
+      ]
+    }
+  ]
+}

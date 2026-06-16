@@ -1,0 +1,6 @@
+{"case_id": "kg_01", "query": "Which carriers serve TX-AZ with no fuel surcharge above 18000 lbs?", "expected_rows": [{"carrier_id": "carrier_a", "lane_id": "TX-AZ", "hop": 1}]}
+{"case_id": "kg_02", "query": "Carriers serving TX-TX with no surcharge", "expected_rows": [{"carrier_id": "carrier_a", "lane_id": "TX-TX", "hop": 1}]}
+{"case_id": "kg_03", "query": "Carrier A lanes", "expected_rows": [{"carrier_id": "carrier_a", "lane_id": "TX-TX", "hop": 1}, {"carrier_id": "carrier_a", "lane_id": "TX-AZ", "hop": 1}]}
+{"case_id": "kg_04", "query": "Carriers on TX-NM with no surcharge", "expected_rows": [{"carrier_id": "carrier_b", "lane_id": "TX-NM", "hop": 1}]}
+{"case_id": "kg_05", "query": "Which carriers serve Austin to Dallas with no fuel surcharge?", "expected_rows": [{"carrier_id": "carrier_a", "lane_id": "TX-TX", "hop": 1}]}
+{"case_id": "kg_06", "query": "Which carriers serve El Paso to Phoenix with no surcharge above 20000 lbs?", "expected_rows": [{"carrier_id": "carrier_a", "lane_id": "TX-AZ", "hop": 1}]}

@@ -1,0 +1,5 @@
+{"case_id": "recommend_low_cost_tx_tx", "user_message": "I need to ship 15,000 lbs Austin to Dallas — what's my best option?"}
+{"case_id": "recommend_high_cost_tx_ca", "user_message": "I need to ship 45,000 lbs Austin to Los Angeles with team-driver expedited service."}
+{"case_id": "recall_preference", "user_message": "What carrier did I prefer last time on the TX-AZ lane?"}
+{"case_id": "policy_lookup", "user_message": "What is the weight threshold for fuel surcharge on TX-TX?"}
+{"case_id": "kg_multi_constraint", "user_message": "Which carriers serve TX-AZ under 18,000 lbs?"}

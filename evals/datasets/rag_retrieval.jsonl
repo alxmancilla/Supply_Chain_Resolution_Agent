@@ -1,0 +1,13 @@
+{"case_id": "rag_01", "query": "What is the Carrier A fuel surcharge structure on TX-TX shipments?", "expected_sources": ["carrier_agreements/carrier_a_2026.pdf", "route_guides/tx_tx_lane.pdf"], "k": 5}
+{"case_id": "rag_02", "query": "Carrier A weight threshold for TX-AZ surcharge", "expected_sources": ["carrier_agreements/carrier_a_2026.pdf", "route_guides/tx_az_lane.pdf"], "k": 5}
+{"case_id": "rag_03", "query": "Carrier B variable surcharge risk and 28% cost overrun", "expected_sources": ["carrier_agreements/carrier_b_2026.pdf"], "k": 5}
+{"case_id": "rag_04", "query": "How do I handle a late delivery exception?", "expected_sources": ["playbooks/late_delivery.pdf"], "k": 5}
+{"case_id": "rag_05", "query": "Damaged goods claim filing window for Carrier A", "expected_sources": ["playbooks/damaged_goods.pdf", "carrier_agreements/carrier_a_2026.pdf"], "k": 5}
+{"case_id": "rag_06", "query": "Weight discrepancy reweigh fee for Carrier B", "expected_sources": ["playbooks/weight_discrepancy.pdf", "carrier_agreements/carrier_b_2026.pdf"], "k": 5}
+{"case_id": "rag_07", "query": "Approval threshold for bookings above $10,000", "expected_sources": ["policies/approval_thresholds.pdf"], "k": 5}
+{"case_id": "rag_08", "query": "TX-CA route primary carrier and transit times", "expected_sources": ["route_guides/tx_ca_lane.pdf"], "k": 5}
+{"case_id": "rag_09", "query": "AZ-CA Phoenix to LA team driver transit", "expected_sources": ["route_guides/az_ca_lane.pdf", "carrier_agreements/carrier_c_2026.pdf"], "k": 5}
+{"case_id": "rag_10", "query": "Carrier no-show escalation procedure", "expected_sources": ["playbooks/carrier_no_show.pdf"], "k": 5}
+{"case_id": "rag_11", "query": "Detention rates per hour by carrier", "expected_sources": ["policies/freight_guidelines_appointments.pdf"], "k": 5}
+{"case_id": "rag_12", "query": "Approved vendor list and FMCSA safety rating requirement", "expected_sources": ["policies/vendor_list.pdf"], "k": 5}
+{"case_id": "rag_13", "query": "Hours of service single driver limit 600 miles overnight", "expected_sources": ["policies/hours_of_service.pdf"], "k": 5}

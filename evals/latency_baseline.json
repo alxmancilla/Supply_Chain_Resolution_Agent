@@ -1,0 +1,149 @@
+{
+  "mode": "latency",
+  "metrics": [
+    {
+      "name": "latency_p50_p95",
+      "dataset": "/Users/mancilla/sw/Supply_Chain_Resolution_Agent/evals/datasets/latency.jsonl",
+      "n": 5,
+      "passed": 5,
+      "score": 1.0,
+      "extras": {
+        "runs_per_case": 3,
+        "ttft_ms": {
+          "p50": 6552.9,
+          "p95": 13628.2,
+          "min": 1799.9,
+          "max": 14074.6
+        },
+        "llm_ms": {
+          "p50": 6690.2,
+          "p95": 13753.5,
+          "min": 1851.7,
+          "max": 14213.3
+        }
+      },
+      "cases": [
+        {
+          "case_id": "recommend_low_cost_tx_tx",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "runs": 3
+          },
+          "actual": {
+            "runs_collected": 3,
+            "ttft_ms": {
+              "p50": 6552.9,
+              "p95": 6983.1,
+              "min": 5933.1,
+              "max": 7030.9
+            },
+            "llm_ms": {
+              "p50": 6690.2,
+              "p95": 7083.4,
+              "min": 6471.6,
+              "max": 7127.1
+            }
+          },
+          "notes": "3/3 clean samples"
+        },
+        {
+          "case_id": "recommend_high_cost_tx_ca",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "runs": 3
+          },
+          "actual": {
+            "runs_collected": 3,
+            "ttft_ms": {
+              "p50": 13093.4,
+              "p95": 13976.5,
+              "min": 8355.1,
+              "max": 14074.6
+            },
+            "llm_ms": {
+              "p50": 13191.5,
+              "p95": 14111.1,
+              "min": 8448.0,
+              "max": 14213.3
+            }
+          },
+          "notes": "3/3 clean samples"
+        },
+        {
+          "case_id": "recall_preference",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "runs": 3
+          },
+          "actual": {
+            "runs_collected": 3,
+            "ttft_ms": {
+              "p50": 2148.2,
+              "p95": 3013.8,
+              "min": 1799.9,
+              "max": 3110.0
+            },
+            "llm_ms": {
+              "p50": 2196.7,
+              "p95": 3075.5,
+              "min": 1851.7,
+              "max": 3173.1
+            }
+          },
+          "notes": "3/3 clean samples"
+        },
+        {
+          "case_id": "policy_lookup",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "runs": 3
+          },
+          "actual": {
+            "runs_collected": 3,
+            "ttft_ms": {
+              "p50": 3586.0,
+              "p95": 3696.1,
+              "min": 3327.1,
+              "max": 3708.4
+            },
+            "llm_ms": {
+              "p50": 3674.8,
+              "p95": 3746.9,
+              "min": 3382.3,
+              "max": 3754.9
+            }
+          },
+          "notes": "3/3 clean samples"
+        },
+        {
+          "case_id": "kg_multi_constraint",
+          "passed": true,
+          "score": 1.0,
+          "expected": {
+            "runs": 3
+          },
+          "actual": {
+            "runs_collected": 3,
+            "ttft_ms": {
+              "p50": 12531.0,
+              "p95": 13346.2,
+              "min": 11208.2,
+              "max": 13436.8
+            },
+            "llm_ms": {
+              "p50": 12621.0,
+              "p95": 13463.0,
+              "min": 11334.5,
+              "max": 13556.5
+            }
+          },
+          "notes": "3/3 clean samples"
+        }
+      ]
+    }
+  ]
+}

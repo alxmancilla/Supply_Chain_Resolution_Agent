@@ -1,0 +1,442 @@
+"""Unit tests for the four retriever nodes.
+
+Nodes are exercised against in-memory fakes so the suite runs without
+Atlas, Voyage, or Grove credentials.
+"""
+from __future__ import annotations
+
+from langchain_core.messages import AIMessage, HumanMessage
+
+from agent import nodes
+from agent.nodes import (
+    execute_action,
+    generate_response,
+    plan_action,
+    retrieve_episodes,
+    retrieve_ltm,
+    retrieve_procedures,
+    retrieve_rag,
+    save_memory,
+    validate_citations,
+)
+from tests.fakes import (
+    FakeChatProvider,
+    FakeEpisodicMemory,
+    FakeKnowledgeRetriever,
+    FakeProceduralMemory,
+    FakeSemanticMemory,
+)
+
+
+def _state(context, text: str = "hello"):
+    return {"messages": [HumanMessage(content=text)], "context": context}
+
+
+def test_retrieve_ltm_empty(monkeypatch, context):
+    monkeypatch.setattr(nodes, "get_semantic_memory", lambda: FakeSemanticMemory([]))
+    out = retrieve_ltm(_state(context))
+    assert out["ltm_hits"] == []
+    assert "no prior memories" in out["ltm_context"]
+    assert "ltm_ms" in out["latency_ms"]
+
+
+def test_retrieve_ltm_hits(monkeypatch, context):
+    facts = [{"key": "m1", "content": "User prefers Carrier A.", "score": 0.91}]
+    monkeypatch.setattr(nodes, "get_semantic_memory", lambda: FakeSemanticMemory(facts))
+    out = retrieve_ltm(_state(context, "which carrier?"))
+    assert len(out["ltm_hits"]) == 1
+    assert out["ltm_hits"][0]["content"] == "User prefers Carrier A."
+    assert "User prefers Carrier A." in out["ltm_context"]
+
+
+def test_retrieve_episodes_hits(monkeypatch, context):
+    episodes = [{
+        "key": "ep1",
+        "summary": "shipped El Paso to Phoenix",
+        "lane": "TX-AZ",
+        "recommendation": "Carrier A",
+        "outcome": "booked",
+        "occurred_at": "2026-04-08T14:22:00+00:00",
+        "score": 0.82,
+    }]
+    monkeypatch.setattr(nodes, "get_episodic_memory", lambda: FakeEpisodicMemory(episodes))
+    out = retrieve_episodes(_state(context, "El Paso shipment"))
+    assert len(out["episode_hits"]) == 1
+    assert out["episode_hits"][0]["lane"] == "TX-AZ"
+    assert out["episode_hits"][0]["recommendation"] == "Carrier A"
+    assert "shipped El Paso to Phoenix" in out["episodic_context"]
+
+
+def test_retrieve_procedures_filters_by_realm_and_agent(monkeypatch, context):
+    docs = [
+        {"realm_id": "realm-test", "agent_id": "agent-test", "active": True,
+         "rule_id": "p1", "rule": "always emit lb + kg", "category": "units"},
+        {"realm_id": "realm-other", "agent_id": "agent-test", "active": True,
+         "rule_id": "p2", "rule": "should not match", "category": "units"},
+    ]
+    monkeypatch.setattr(nodes, "get_procedural_memory", lambda: FakeProceduralMemory(docs))
+    out = retrieve_procedures(_state(context))
+    assert len(out["procedure_hits"]) == 1
+    assert out["procedure_hits"][0]["rule_id"] == "p1"
+    assert "always emit lb + kg" in out["procedural_context"]
+
+
+def test_retrieve_procedures_empty(monkeypatch, context):
+    monkeypatch.setattr(nodes, "get_procedural_memory", lambda: FakeProceduralMemory([]))
+    out = retrieve_procedures(_state(context))
+    assert out["procedure_hits"] == []
+    assert "no procedural rules" in out["procedural_context"]
+
+
+def test_retrieve_rag(monkeypatch, context):
+    hits = [{
+        "doc_type": "route_guide",
+        "source": "tx_az_lane.pdf",
+        "text": "Carrier A preferred for TX-AZ.",
+        "score": 0.77,
+        "metadata": {},
+    }]
+    monkeypatch.setattr(nodes, "get_knowledge_retriever", lambda: FakeKnowledgeRetriever(hits))
+    out = retrieve_rag(_state(context, "shipping question?"))
+    assert len(out["rag_hits"]) == 1
+    assert "Carrier A preferred for TX-AZ." in out["rag_context"]
+    assert "rag_ms" in out["latency_ms"]
+
+
+def test_retrieve_ltm_no_query_returns_empty(monkeypatch, context):
+    facts = [{"key": "x", "content": "y"}]
+    monkeypatch.setattr(nodes, "get_semantic_memory", lambda: FakeSemanticMemory(facts))
+    # No HumanMessage → _last_user_text returns "" → no search
+    state = {"messages": [], "context": context}
+    out = retrieve_ltm(state)
+    assert out["ltm_hits"] == []
+
+
+def _boom(*_args, **_kwargs):
+    raise RuntimeError("backend unavailable")
+
+
+def test_retrieve_ltm_degrades_on_backend_failure(monkeypatch, context):
+    monkeypatch.setattr(nodes, "get_semantic_memory", _boom)
+    out = retrieve_ltm(_state(context, "anything"))
+    assert out["ltm_hits"] == []
+    assert "retrieval degraded" in out["ltm_context"]
+    assert any("retrieve_ltm" in m for m in out.get("degraded", []))
+    assert "ltm_ms" in out["latency_ms"]
+
+
+def test_retrieve_rag_degrades_on_retriever_failure(monkeypatch, context):
+    monkeypatch.setattr(nodes, "get_knowledge_retriever", _boom)
+    out = retrieve_rag(_state(context, "anything"))
+    assert out["rag_hits"] == []
+    assert "retrieval degraded" in out["rag_context"]
+    assert any("retrieve_rag" in m for m in out.get("degraded", []))
+
+
+class _Chunk:
+    def __init__(self, text: str) -> None:
+        self.content = text
+
+
+class _StreamingLLM:
+    def __init__(self, deltas: list[str]) -> None:
+        self._deltas = deltas
+
+    def stream(self, _prompt):
+        for d in self._deltas:
+            yield _Chunk(d)
+
+
+class _NonStreamingLLM:
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+
+    def invoke(self, _prompt):
+        return AIMessage(content=self._reply)
+
+
+def _llm_state(context):
+    return {"messages": [HumanMessage(content="hello")], "context": context}
+
+
+def test_generate_response_records_ttft_on_streaming_path(monkeypatch, context):
+    monkeypatch.setattr(nodes, "get_llm", lambda: _StreamingLLM(["", "Hello ", "world."]))
+    out = generate_response(_llm_state(context))
+    assert isinstance(out["messages"][0], AIMessage)
+    assert out["messages"][0].content == "Hello world."
+    latency = out["latency_ms"]
+    assert "llm_ttft_ms" in latency
+    assert latency["llm_ttft_ms"] >= 0.0
+
+
+def test_generate_response_records_ttft_on_non_streaming_path(monkeypatch, context):
+    monkeypatch.setattr(nodes, "get_llm", lambda: _NonStreamingLLM("ok"))
+    out = generate_response(_llm_state(context))
+    assert out["messages"][0].content == "ok"
+    assert "llm_ttft_ms" in out["latency_ms"]
+
+
+def test_generate_response_skips_ttft_when_reply_is_empty(monkeypatch, context):
+    monkeypatch.setattr(nodes, "get_llm", lambda: _NonStreamingLLM(""))
+    out = generate_response(_llm_state(context))
+    assert out["messages"][0].content == ""
+    assert "llm_ttft_ms" not in out.get("latency_ms", {})
+
+
+def _citation_state(reply: str, *, rag=None, kg=None, context=None):
+    state = {
+        "messages": [HumanMessage(content="q"), AIMessage(content=reply)],
+        "rag_hits": rag or [],
+        "kg_hits": kg or [],
+    }
+    if context is not None:
+        state["context"] = context
+    return state
+
+
+def test_validate_citations_passes_when_reply_cites_rag_basename():
+    state = _citation_state(
+        "Per carrier_a_2026.pdf the TX-AZ surcharge applies above 22000 lb.",
+        rag=[{"source": "carrier_agreements/carrier_a_2026.pdf", "text": "..."}],
+    )
+    assert "degraded" not in validate_citations(state)
+
+
+def test_validate_citations_passes_when_reply_cites_kg_source_doc():
+    fact = (
+        "- Carrier A serves lane TX-AZ (Austin->Phoenix); priority=1 "
+        "[sources: route_guides/tx_az_lane.pdf, carrier_agreements/carrier_a_2026.pdf]"
+    )
+    state = _citation_state(
+        "See route_guides/tx_az_lane.pdf for the lane policy.",
+        kg=[{"fact": fact}],
+    )
+    assert "degraded" not in validate_citations(state)
+
+
+def test_validate_citations_flags_missing_citation():
+    state = _citation_state(
+        "Carrier A is your best option for TX-AZ.",
+        rag=[{"source": "carrier_agreements/carrier_a_2026.pdf", "text": "..."}],
+    )
+    out = validate_citations(state)
+    assert out.get("degraded") == ["citations_missing"]
+
+
+def test_validate_citations_skips_when_no_groundable_sources():
+    state = _citation_state("You preferred Carrier A last time.", rag=[], kg=[])
+    assert "degraded" not in validate_citations(state)
+
+
+def test_validate_citations_skips_when_reply_is_empty():
+    state = _citation_state(
+        "",
+        rag=[{"source": "carrier_agreements/carrier_a_2026.pdf"}],
+    )
+    assert "degraded" not in validate_citations(state)
+
+
+def _save_memory_state(context, agent_reply: str = "ok"):
+    return {
+        "messages": [HumanMessage(content="how do I ship TX-AZ?"), AIMessage(content=agent_reply)],
+        "context": context,
+    }
+
+
+def _stub_save_memory_deps(monkeypatch, *, every: int):
+    """Wire fakes so `save_memory` runs without Atlas / Voyage / Grove."""
+    from core.settings import Settings
+
+    extraction_json = '{"facts": ["User prefers Carrier A."], "episode": null}'
+    chat = FakeChatProvider(reply=extraction_json)
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    monkeypatch.setattr(nodes, "get_semantic_memory", lambda: FakeSemanticMemory([]))
+    monkeypatch.setattr(nodes, "get_episodic_memory", lambda: FakeEpisodicMemory([]))
+    settings = Settings(
+        mongodb_uri="mongodb://localhost:27017/test",
+        reflect_every_n_turns=every,
+    )
+    monkeypatch.setattr(nodes, "get_settings", lambda: settings)
+
+
+def test_save_memory_skips_reflection_when_disabled(monkeypatch, context):
+    nodes._reset_turn_counters()
+    _stub_save_memory_deps(monkeypatch, every=0)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        nodes, "_run_reflection_pass",
+        lambda r, u, t: calls.append((r, u, t)) or {"clusters_found": 0},
+    )
+    out = save_memory(_save_memory_state(context))
+    assert "reflection" not in out
+    assert calls == []
+
+
+def test_save_memory_triggers_reflection_every_n_turns(monkeypatch, context):
+    nodes._reset_turn_counters()
+    _stub_save_memory_deps(monkeypatch, every=2)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        nodes, "_run_reflection_pass",
+        lambda r, u, t: calls.append((r, u, t)) or {
+            "clusters_found": 1, "canonical_written": 1, "tombstoned": 2,
+        },
+    )
+
+    first = save_memory(_save_memory_state(context))
+    assert "reflection" not in first
+    assert calls == []
+
+    second = save_memory(_save_memory_state(context))
+    assert second["reflection"] == {
+        "clusters_found": 1, "canonical_written": 1, "tombstoned": 2,
+    }
+    assert calls == [(context.realm_id, context.user_id, 0.88)]
+
+    third = save_memory(_save_memory_state(context))
+    assert "reflection" not in third
+    assert len(calls) == 1
+
+
+def test_save_memory_degrades_when_reflection_raises(monkeypatch, context):
+    nodes._reset_turn_counters()
+    _stub_save_memory_deps(monkeypatch, every=1)
+
+    def _boom_reflection(*_args, **_kwargs):
+        raise RuntimeError("atlas down")
+
+    monkeypatch.setattr(nodes, "_run_reflection_pass", _boom_reflection)
+    out = save_memory(_save_memory_state(context))
+    assert "reflection" not in out
+    assert out.get("degraded") == ["reflection_failed"]
+
+
+def _propose_state(context, *, user="going forward, always prefer Carrier A on TX-AZ",
+                   agent="Got it — I will propose this rule for approval."):
+    return {
+        "messages": [HumanMessage(content=user), AIMessage(content=agent)],
+        "context": context,
+        "routing": {"intent_label": "propose_procedure", "branches": ["procedures"]},
+    }
+
+
+def test_plan_action_uses_procedure_prompt_when_routing_proposes(monkeypatch, context):
+    chat = FakeChatProvider(
+        reply='{"action_type": "propose_procedure", "rule": "Always prefer Carrier A on TX-AZ.", "category": "policy", "rationale": "user preference"}'
+    )
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    out = plan_action(_propose_state(context))
+    assert out["action_plan"]["action_type"] == "propose_procedure"
+    assert out["action_plan"]["rule"] == "Always prefer Carrier A on TX-AZ."
+    assert out["action_plan"]["category"] == "policy"
+    assert "User: going forward" in chat.calls[0]
+    assert "PROCEDURE EXTRACTOR" in chat.calls[0]
+
+
+def test_plan_action_drops_empty_procedure_proposal(monkeypatch, context):
+    chat = FakeChatProvider(reply='{"action_type": "propose_procedure", "rule": "", "category": "general", "rationale": ""}')
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    out = plan_action(_propose_state(context))
+    assert out["action_plan"] == {"action_type": "none"}
+
+
+def test_plan_action_keeps_booking_path_when_intent_not_propose(monkeypatch, context):
+    chat = FakeChatProvider(
+        reply='{"action_type": "create_booking_draft", "carrier": "A", "lane": "TX-AZ", "weight_lb": 1000, "estimated_cost_usd": 500, "requires_approval": false, "rationale": "r"}'
+    )
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    state = {
+        "messages": [HumanMessage(content="ship 1000 lb to Phoenix"), AIMessage(content="Carrier A.")],
+        "context": context,
+        "routing": {"intent_label": "recommend_shipment", "branches": list(nodes.ALL_BRANCHES)},
+    }
+    out = plan_action(state)
+    assert out["action_plan"]["action_type"] == "create_booking_draft"
+    assert out["action_plan"]["carrier"] == "A"
+    assert "ACTION PLANNER" in chat.calls[0]
+
+
+def _propose_plan(rule="Always prefer Carrier A on TX-AZ.", category="policy", rationale="user pref"):
+    return {
+        "action_type": "propose_procedure",
+        "rule": rule,
+        "category": category,
+        "rationale": rationale,
+    }
+
+
+def test_execute_action_propose_procedure_commits_on_approval(monkeypatch, context):
+    proc_mem = FakeProceduralMemory()
+    monkeypatch.setattr(nodes, "get_procedural_memory", lambda: proc_mem)
+    monkeypatch.setattr(nodes, "interrupt", lambda _payload: {"approved": True, "approver": "alice"})
+    state = {"context": context, "action_plan": _propose_plan()}
+    out = execute_action(state)
+    proposal = out["procedure_proposal"]
+    assert proposal["status"] == "approved"
+    assert proposal["approver"] == "alice"
+    assert proposal["rule"] == "Always prefer Carrier A on TX-AZ."
+    assert proposal["category"] == "policy"
+    assert len(proc_mem.committed) == 1
+    assert proc_mem.committed[0]["active"] is True
+    assert proc_mem.committed[0]["realm_id"] == context.realm_id
+    assert proc_mem.rejected == []
+
+
+def test_execute_action_propose_procedure_rejects(monkeypatch, context):
+    proc_mem = FakeProceduralMemory()
+    monkeypatch.setattr(nodes, "get_procedural_memory", lambda: proc_mem)
+    monkeypatch.setattr(nodes, "interrupt", lambda _payload: {"approved": False, "approver": "bob"})
+    state = {"context": context, "action_plan": _propose_plan()}
+    out = execute_action(state)
+    assert out["procedure_proposal"]["status"] == "rejected"
+    assert proc_mem.committed == []
+    assert len(proc_mem.rejected) == 1
+    assert proc_mem.rejected[0]["approver"] == "bob"
+
+
+def test_execute_action_propose_procedure_interrupt_payload_shape(monkeypatch, context):
+    proc_mem = FakeProceduralMemory()
+    captured: dict = {}
+
+    def _stub_interrupt(payload):
+        captured.update(payload)
+        return {"approved": True, "approver": "ops"}
+
+    monkeypatch.setattr(nodes, "get_procedural_memory", lambda: proc_mem)
+    monkeypatch.setattr(nodes, "interrupt", _stub_interrupt)
+    execute_action({"context": context, "action_plan": _propose_plan()})
+    assert captured["kind"] == "procedure_proposal"
+    assert captured["rule"] == "Always prefer Carrier A on TX-AZ."
+    assert captured["category"] == "policy"
+    assert captured["proposal_id"].startswith("proc_")
+
+
+def test_execute_action_noop_when_action_type_none(monkeypatch, context):
+    monkeypatch.setattr(nodes, "interrupt", lambda _p: (_ for _ in ()).throw(AssertionError("no interrupt")))
+    out = execute_action({"context": context, "action_plan": {"action_type": "none"}})
+    assert "procedure_proposal" not in out
+    assert "booking_draft" not in out
+
+
+def test_merge_degraded_concatenates_within_turn():
+    from agent.nodes import _merge_degraded
+    assert _merge_degraded(["retrieve_ltm"], ["retrieve_rag"]) == ["retrieve_ltm", "retrieve_rag"]
+
+
+def test_merge_degraded_dedupes_same_marker_within_turn():
+    from agent.nodes import _merge_degraded
+    assert _merge_degraded(["citations_missing"], ["citations_missing"]) == ["citations_missing"]
+
+
+def test_merge_degraded_reset_sentinel_clears_accumulated_markers():
+    from agent.nodes import _DEGRADED_RESET, _merge_degraded
+    prior = ["citations_missing", "retrieve_ltm"]
+    assert _merge_degraded(prior, [_DEGRADED_RESET]) == []
+    assert _merge_degraded(prior, [_DEGRADED_RESET, "citations_missing"]) == ["citations_missing"]
+
+
+def test_merge_degraded_handles_none_inputs():
+    from agent.nodes import _merge_degraded
+    assert _merge_degraded(None, None) == []
+    assert _merge_degraded(None, ["x"]) == ["x"]
+    assert _merge_degraded(["x"], None) == ["x"]

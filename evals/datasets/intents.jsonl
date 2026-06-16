@@ -1,0 +1,20 @@
+{"case_id": "int_01", "user_message": "I need to ship 15,000 lbs from Austin to Dallas", "expected_intent": "recommend_shipment"}
+{"case_id": "int_02", "user_message": "Recommend a carrier for 22000 lbs Houston to San Antonio", "expected_intent": "recommend_shipment"}
+{"case_id": "int_03", "user_message": "Book a shipment, 8000 lb dry van, El Paso to Phoenix", "expected_intent": "recommend_shipment"}
+{"case_id": "int_04", "user_message": "What carrier did I prefer last time on TX-AZ?", "expected_intent": "recall_preference"}
+{"case_id": "int_05", "user_message": "Which carrier did I pick for Austin to Dallas?", "expected_intent": "recall_preference"}
+{"case_id": "int_06", "user_message": "What was my preference for intra-TX shipments?", "expected_intent": "recall_preference"}
+{"case_id": "int_07", "user_message": "Show me the past shipment to Phoenix", "expected_intent": "recall_episode"}
+{"case_id": "int_08", "user_message": "Was there a recent shipment with Carrier B?", "expected_intent": "recall_episode"}
+{"case_id": "int_09", "user_message": "Give me the history of TX-AZ shipments this month", "expected_intent": "recall_episode"}
+{"case_id": "int_10", "user_message": "What does the SLA say about fuel surcharge?", "expected_intent": "lookup_policy"}
+{"case_id": "int_11", "user_message": "Pull up the carrier agreement tariff details", "expected_intent": "lookup_policy"}
+{"case_id": "int_12", "user_message": "Show me the route guide policy", "expected_intent": "lookup_policy"}
+{"case_id": "int_13", "user_message": "Which carriers serve TX-AZ with no fuel surcharge?", "expected_intent": "structured_lookup"}
+{"case_id": "int_14", "user_message": "List carriers over 18000 lbs without surcharge", "expected_intent": "structured_lookup"}
+{"case_id": "int_15", "user_message": "What lanes do not have fuel surcharge above 20000 lbs?", "expected_intent": "structured_lookup"}
+{"case_id": "int_16", "user_message": "List the operating rules", "expected_intent": "list_rules"}
+{"case_id": "int_17", "user_message": "Show the active rules for this tenant", "expected_intent": "list_rules"}
+{"case_id": "int_18", "user_message": "What are the operating procedures?", "expected_intent": "list_rules"}
+{"case_id": "int_19", "user_message": "hello there", "expected_intent": "fallback"}
+{"case_id": "int_20", "user_message": "?", "expected_intent": "fallback"}
