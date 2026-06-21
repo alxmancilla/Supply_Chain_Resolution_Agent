@@ -158,3 +158,28 @@ Facts to consolidate:
 {facts}
 
 JSON:"""
+
+
+REFLECTION_PROMPT = """You are the EVIDENCE REFLECTION step for a supply chain
+agent. Decide whether the retrieved evidence below is sufficient to answer the
+user's question with citations. If not, name what is missing and propose a
+single focused follow-up subquery for another retrieval pass.
+
+Rules:
+- `sufficient` is true only when the evidence directly addresses the question
+  with at least one citable source.
+- `missing` is a list of 1-3 short phrases (each <= 10 words) naming the gaps.
+- `followup_subquery` is one focused query under 20 words rewriting the user's
+  question with concrete supply-chain terms. Use null when sufficient.
+- `rationale` is one short clause (<= 15 words).
+
+Output a SINGLE JSON object on one line, no markdown fences, no prose:
+{{"sufficient": <bool>, "missing": ["...", ...], "followup_subquery": "..." | null, "rationale": "..."}}
+
+User question:
+{user_message}
+
+Retrieved evidence summary:
+{evidence_summary}
+
+JSON:"""

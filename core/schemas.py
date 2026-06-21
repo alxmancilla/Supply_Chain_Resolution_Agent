@@ -180,6 +180,31 @@ class ProcedureProposal(BaseModel):
         return data
 
 
+class ResearchPlan(BaseModel):
+    """The per-turn retrieval plan emitted by `think_and_plan`.
+
+    A pass-through copy of the router's branches on the first pass; on a
+    re-plan (triggered by the Reflection Agent) the LLM may narrow the
+    branch set and substitute a refined `subquery` used by the retrievers.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    branches: list[BranchName] = Field(default_factory=lambda: list(ALL_BRANCHES))
+    subquery: Optional[str] = None
+    rationale: str = ""
+    replan_count: int = 0
+
+
+class EvidenceReflection(BaseModel):
+    """The data-sufficiency verdict emitted by `reflect_on_evidence`."""
+    model_config = ConfigDict(extra="allow")
+
+    sufficient: bool = True
+    missing: list[str] = Field(default_factory=list)
+    followup_subquery: Optional[str] = None
+    rationale: str = ""
+
+
 __all__ = [
     "SemanticFact",
     "Episode",
@@ -198,4 +223,6 @@ __all__ = [
     "ProcedureCategory",
     "BookingProposal",
     "ProcedureProposal",
+    "ResearchPlan",
+    "EvidenceReflection",
 ]

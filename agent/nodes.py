@@ -31,7 +31,13 @@ from core.providers.registry import get_chat_provider
 from core.rag.mongo import get_knowledge_retriever
 from core.resilience import safe_retrieve
 from core.router import get_intent_router
-from core.schemas import ALL_BRANCHES, BookingProposal, ProcedureProposal
+from core.schemas import (
+    ALL_BRANCHES,
+    BookingProposal,
+    EvidenceReflection,
+    ProcedureProposal,
+    ResearchPlan,
+)
 from core.settings import get_settings
 from core.usage import extract_usage_metadata, merge_usage, usage_payload
 
@@ -78,6 +84,7 @@ from .prompts import (
     ACTION_PLANNING_PROMPT,
     MEMORY_EXTRACTION_PROMPT,
     PROCEDURE_PROPOSAL_PROMPT,
+    REFLECTION_PROMPT,
     SYSTEM_PROMPT,
 )
 
@@ -86,6 +93,8 @@ LTM_TOP_K = 5
 EPISODES_TOP_K = 3
 KG_TOP_K = 8
 AGENT_ID = "supply-chain-resolution-agent"
+MAX_REPLANS = 1
+_GROUNDING_INTENTS = frozenset({"recommend_shipment", "lookup_policy", "structured_lookup", "fallback"})
 
 _TURN_COUNTERS: dict[tuple[str, str], int] = {}
 
@@ -131,6 +140,8 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     context: AgentContext
     routing: dict[str, Any]
+    plan: dict[str, Any]
+    reflection_eval: dict[str, Any]
     ltm_context: str
     rag_context: str
     episodic_context: str
@@ -169,6 +180,19 @@ def _last_user_text(messages: list[BaseMessage]) -> str:
     return ""
 
 
+def _query_for(state: AgentState) -> str:
+    """Return the active retrieval query — `plan.subquery` if set, else the last user text.
+
+    Lets the Reflection / Think & Plan loop substitute a refined subquery for
+    a rescue retrieval pass without changing retriever call sites.
+    """
+    plan = state.get("plan") or {}
+    subquery = plan.get("subquery")
+    if isinstance(subquery, str) and subquery.strip():
+        return subquery
+    return _last_user_text(state["messages"])
+
+
 _ROUTER_FALLBACK = {
     "intent_label": "fallback",
     "branches": list(ALL_BRANCHES),
@@ -190,10 +214,56 @@ def classify_intent(state: AgentState) -> dict[str, Any]:
     return {**reset, "routing": routing}
 
 
+_REPLAN_BRANCHES: tuple[str, ...] = ("rag", "kg", "procedures")
+
+
+@timed("plan_ms")
+def think_and_plan(state: AgentState) -> dict[str, Any]:
+    """Process-reflection step that produces the per-turn retrieval plan.
+
+    First pass: mirrors the router's branches into `plan` with no subquery
+    rewrite (zero LLM cost). On a replan pass — triggered when the
+    Reflection Agent emits `sufficient=False` with a `followup_subquery` —
+    narrows to grounding-oriented branches and substitutes the refined
+    subquery so the retrievers run a rescue pass against tighter terms.
+    """
+    routing = state.get("routing") or {}
+    router_branches = list(routing.get("branches") or ALL_BRANCHES)
+    prior_plan = state.get("plan") or {}
+    reflection = state.get("reflection_eval") or {}
+    replan_count = int(prior_plan.get("replan_count") or 0)
+
+    needs_replan = (
+        bool(prior_plan)
+        and reflection.get("sufficient") is False
+        and replan_count < MAX_REPLANS
+    )
+
+    if not needs_replan:
+        plan = ResearchPlan(
+            branches=router_branches,
+            subquery=None,
+            rationale="first-pass plan mirrors router branches",
+            replan_count=0,
+        )
+        return {"plan": plan.model_dump()}
+
+    followup = reflection.get("followup_subquery")
+    subquery = followup.strip() if isinstance(followup, str) and followup.strip() else None
+    narrowed = [b for b in router_branches if b in _REPLAN_BRANCHES] or list(_REPLAN_BRANCHES)
+    plan = ResearchPlan(
+        branches=narrowed,
+        subquery=subquery,
+        rationale="replan: narrowed to grounding branches with refined subquery",
+        replan_count=replan_count + 1,
+    )
+    return {"plan": plan.model_dump()}
+
+
 @timed("ltm_ms")
 @safe_retrieve("retrieve_ltm", ltm_context="(retrieval degraded)", ltm_hits=[])
 def retrieve_ltm(state: AgentState) -> dict[str, Any]:
-    query = _last_user_text(state["messages"])
+    query = _query_for(state)
     ctx = state["context"]
     hits: list[dict[str, Any]] = []
     context = "(no prior memories found)"
@@ -208,7 +278,7 @@ def retrieve_ltm(state: AgentState) -> dict[str, Any]:
 @timed("rag_ms")
 @safe_retrieve("retrieve_rag", rag_context="(retrieval degraded)", rag_hits=[])
 def retrieve_rag(state: AgentState) -> dict[str, Any]:
-    query = _last_user_text(state["messages"])
+    query = _query_for(state)
     hits: list[dict[str, Any]] = []
     context = "(no knowledge chunks retrieved)"
     if query:
@@ -227,7 +297,7 @@ def retrieve_rag(state: AgentState) -> dict[str, Any]:
 @timed("episodes_ms")
 @safe_retrieve("retrieve_episodes", episodic_context="(retrieval degraded)", episode_hits=[])
 def retrieve_episodes(state: AgentState) -> dict[str, Any]:
-    query = _last_user_text(state["messages"])
+    query = _query_for(state)
     ctx = state["context"]
     hits: list[dict[str, Any]] = []
     context = "(no prior episodes found)"
@@ -261,7 +331,7 @@ def retrieve_procedures(state: AgentState) -> dict[str, Any]:
 @timed("kg_ms")
 @safe_retrieve("retrieve_kg", kg_context="(retrieval degraded)", kg_hits=[])
 def retrieve_kg(state: AgentState) -> dict[str, Any]:
-    query = _last_user_text(state["messages"])
+    query = _query_for(state)
     ctx = state["context"]
     if not query:
         return {"kg_context": "(no query)", "kg_hits": []}
@@ -281,12 +351,91 @@ def retrieve_kg(state: AgentState) -> dict[str, Any]:
     return {"kg_context": context, "kg_hits": hits}
 
 
+def _evidence_summary(state: AgentState) -> str:
+    parts: list[str] = []
+    for label, field in (
+        ("rag", "rag_context"),
+        ("kg", "kg_context"),
+        ("procedures", "procedural_context"),
+        ("episodes", "episodic_context"),
+        ("ltm", "ltm_context"),
+    ):
+        text = state.get(field) or ""
+        text = text.strip()
+        if text and not text.startswith("("):
+            parts.append(f"[{label}] {text[:280]}")
+    return "\n".join(parts) if parts else "(no grounding evidence retrieved)"
+
+
+@timed("reflect_ms")
+def reflect_on_evidence(state: AgentState) -> dict[str, Any]:
+    """Data-reflection step that decides whether retrieved evidence is sufficient.
+
+    Non-grounding intents (recall, list, propose) short-circuit to sufficient.
+    For grounding intents, any RAG / KG / procedure hits count as sufficient.
+    When evidence is thin and the replan budget is exhausted, the node forwards
+    anyway and flags `evidence_insufficient` so the response can degrade
+    gracefully. When budget remains, the LLM is asked for a structured verdict
+    naming the gaps and a refined follow-up subquery.
+    """
+    routing = state.get("routing") or {}
+    intent = routing.get("intent_label") or "fallback"
+    plan = state.get("plan") or {}
+    replan_count = int(plan.get("replan_count") or 0)
+
+    if intent not in _GROUNDING_INTENTS:
+        verdict = EvidenceReflection(sufficient=True, rationale="non-grounding intent")
+        return {"reflection_eval": verdict.model_dump()}
+
+    hits = (
+        len(state.get("rag_hits") or [])
+        + len(state.get("kg_hits") or [])
+        + len(state.get("procedure_hits") or [])
+    )
+    if hits > 0:
+        verdict = EvidenceReflection(sufficient=True, rationale="retrieval returned grounded hits")
+        return {"reflection_eval": verdict.model_dump()}
+
+    if replan_count >= MAX_REPLANS:
+        verdict = EvidenceReflection(
+            sufficient=True,
+            missing=["grounded sources"],
+            rationale="replan budget exhausted; forwarding with degraded flag",
+        )
+        return {
+            "reflection_eval": verdict.model_dump(),
+            "degraded": ["evidence_insufficient"],
+        }
+
+    user_text = _last_user_text(state["messages"])
+    chat = get_chat_provider()
+    prompt = REFLECTION_PROMPT.format(
+        user_message=user_text,
+        evidence_summary=_evidence_summary(state),
+    )
+    try:
+        verdict = chat.invoke_typed(prompt, EvidenceReflection)
+    except ValueError:
+        verdict = EvidenceReflection(
+            sufficient=False,
+            missing=["grounded sources"],
+            followup_subquery=user_text,
+            rationale="reflection LLM parse failed; defaulting to one rescue pass",
+        )
+    assert isinstance(verdict, EvidenceReflection)
+    out: dict[str, Any] = {"reflection_eval": verdict.model_dump()}
+    usage = getattr(chat, "last_usage", None)
+    if usage:
+        out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], get_settings())
+    return out
+
+
 _SKIPPED_NOTE = "(not retrieved this turn — intent router skipped this branch)"
 
 
 def _ctx_for(state: AgentState, branch: str, field: str) -> str:
-    routing = state.get("routing") or {}
-    branches = routing.get("branches")
+    plan = state.get("plan") or {}
+    branches = plan.get("branches") or (state.get("routing") or {}).get("branches")
     if branches is not None and branch not in branches:
         return _SKIPPED_NOTE
     return state.get(field, "")

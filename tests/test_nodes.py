@@ -12,11 +12,13 @@ from agent.nodes import (
     execute_action,
     generate_response,
     plan_action,
+    reflect_on_evidence,
     retrieve_episodes,
     retrieve_ltm,
     retrieve_procedures,
     retrieve_rag,
     save_memory,
+    think_and_plan,
     validate_citations,
 )
 from tests.fakes import (
@@ -440,3 +442,167 @@ def test_merge_degraded_handles_none_inputs():
     assert _merge_degraded(None, None) == []
     assert _merge_degraded(None, ["x"]) == ["x"]
     assert _merge_degraded(["x"], None) == ["x"]
+
+
+def _plan_state(context, text: str = "ship 5000 lbs TX to AZ", **extra):
+    state = {
+        "messages": [HumanMessage(content=text)],
+        "context": context,
+        "routing": {"intent_label": "recommend_shipment", "branches": list(["ltm", "episodes", "procedures", "rag", "kg"])},
+    }
+    state.update(extra)
+    return state
+
+
+def test_think_and_plan_first_pass_mirrors_router(context):
+    out = think_and_plan(_plan_state(context))
+    plan = out["plan"]
+    assert plan["branches"] == ["ltm", "episodes", "procedures", "rag", "kg"]
+    assert plan["subquery"] is None
+    assert plan["replan_count"] == 0
+
+
+def test_think_and_plan_replan_narrows_and_refines(context):
+    state = _plan_state(
+        context,
+        plan={"branches": ["ltm", "episodes", "procedures", "rag", "kg"], "subquery": None, "replan_count": 0},
+        reflection_eval={"sufficient": False, "followup_subquery": "TX-AZ surcharge over 5000 lbs"},
+    )
+    out = think_and_plan(state)
+    plan = out["plan"]
+    assert plan["replan_count"] == 1
+    assert plan["subquery"] == "TX-AZ surcharge over 5000 lbs"
+    assert set(plan["branches"]).issubset({"rag", "kg", "procedures"})
+
+
+def test_think_and_plan_does_not_replan_when_budget_exhausted(context):
+    state = _plan_state(
+        context,
+        plan={"branches": ["rag", "kg"], "subquery": "prior", "replan_count": 1},
+        reflection_eval={"sufficient": False, "followup_subquery": "second try"},
+    )
+    out = think_and_plan(state)
+    plan = out["plan"]
+    assert plan["replan_count"] == 0
+    assert plan["subquery"] is None
+
+
+def test_query_for_prefers_plan_subquery(context):
+    from agent.nodes import _query_for
+    state = _plan_state(context, text="raw user text", plan={"subquery": "refined supply chain terms"})
+    assert _query_for(state) == "refined supply chain terms"
+    assert _query_for(_plan_state(context, text="raw user text")) == "raw user text"
+
+
+def test_reflect_on_evidence_non_grounding_intent_is_sufficient(monkeypatch, context):
+    chat = FakeChatProvider(reply="should not be called")
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    state = {
+        "messages": [HumanMessage(content="what rules are active?")],
+        "context": context,
+        "routing": {"intent_label": "list_rules", "branches": ["procedures"]},
+    }
+    out = reflect_on_evidence(state)
+    assert out["reflection_eval"]["sufficient"] is True
+    assert chat.calls == []
+
+
+def test_reflect_on_evidence_grounding_with_hits_is_sufficient(monkeypatch, context):
+    chat = FakeChatProvider(reply="should not be called")
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    state = {
+        "messages": [HumanMessage(content="recommend a carrier")],
+        "context": context,
+        "routing": {"intent_label": "recommend_shipment", "branches": ["rag", "kg"]},
+        "rag_hits": [{"source": "guide.md"}],
+    }
+    out = reflect_on_evidence(state)
+    assert out["reflection_eval"]["sufficient"] is True
+    assert chat.calls == []
+
+
+def test_reflect_on_evidence_thin_evidence_calls_llm_for_replan(monkeypatch, context):
+    import json
+    payload = json.dumps({
+        "sufficient": False,
+        "missing": ["carrier SLA"],
+        "followup_subquery": "carrier SLA for TX-AZ over 5000 lbs",
+        "rationale": "no rag hits",
+    })
+    chat = FakeChatProvider(reply=payload, usage={"input_tokens": 12, "output_tokens": 8})
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    state = {
+        "messages": [HumanMessage(content="recommend a carrier")],
+        "context": context,
+        "routing": {"intent_label": "recommend_shipment", "branches": ["rag", "kg"]},
+        "plan": {"replan_count": 0},
+        "rag_hits": [],
+        "kg_hits": [],
+    }
+    out = reflect_on_evidence(state)
+    eval_out = out["reflection_eval"]
+    assert eval_out["sufficient"] is False
+    assert eval_out["followup_subquery"].startswith("carrier SLA")
+    assert len(chat.calls) == 1
+
+
+def test_reflect_on_evidence_forwards_when_budget_exhausted(monkeypatch, context):
+    chat = FakeChatProvider(reply="should not be called")
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    state = {
+        "messages": [HumanMessage(content="recommend a carrier")],
+        "context": context,
+        "routing": {"intent_label": "recommend_shipment", "branches": ["rag", "kg"]},
+        "plan": {"replan_count": 1},
+        "rag_hits": [],
+        "kg_hits": [],
+    }
+    out = reflect_on_evidence(state)
+    assert out["reflection_eval"]["sufficient"] is True
+    assert "evidence_insufficient" in out["degraded"]
+    assert chat.calls == []
+
+
+def test_reflect_on_evidence_llm_parse_failure_defaults_to_one_rescue(monkeypatch, context):
+    chat = FakeChatProvider(reply="not json at all")
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    state = {
+        "messages": [HumanMessage(content="recommend a carrier")],
+        "context": context,
+        "routing": {"intent_label": "recommend_shipment", "branches": ["rag", "kg"]},
+        "plan": {"replan_count": 0},
+        "rag_hits": [],
+        "kg_hits": [],
+    }
+    out = reflect_on_evidence(state)
+    eval_out = out["reflection_eval"]
+    assert eval_out["sufficient"] is False
+    assert eval_out["followup_subquery"] == "recommend a carrier"
+
+
+def test_retrievers_use_plan_subquery_when_present(monkeypatch, context):
+    captured: dict[str, str] = {}
+
+    class CapturingSemantic:
+        def search(self, realm_id, user_id, query, limit):
+            captured["ltm"] = query
+            return []
+
+    monkeypatch.setattr(nodes, "get_semantic_memory", lambda: CapturingSemantic())
+    state = {
+        "messages": [HumanMessage(content="raw user text")],
+        "context": context,
+        "plan": {"subquery": "refined carrier SLA lookup"},
+    }
+    retrieve_ltm(state)
+    assert captured["ltm"] == "refined carrier SLA lookup"
+
+
+def test_graph_wires_think_and_plan_and_reflection_loop(monkeypatch):
+    from agent import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "get_checkpointer", lambda: None)
+    monkeypatch.setattr(graph_mod, "get_store", lambda: None)
+    g = graph_mod.build_graph()
+    nodes_set = set(g.get_graph().nodes.keys())
+    assert {"think_and_plan", "reflect_on_evidence"}.issubset(nodes_set)
+
