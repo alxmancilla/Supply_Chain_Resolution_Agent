@@ -27,6 +27,7 @@ from core.memory import (
     get_procedural_memory,
     get_semantic_memory,
 )
+from core.providers.chat.retry import invoke_typed_with_retry
 from core.providers.registry import get_chat_provider
 from core.rag.mongo import get_knowledge_retriever
 from core.resilience import safe_retrieve
@@ -205,6 +206,21 @@ def _record_chat_fallback(chat: Any, out: dict[str, Any]) -> None:
     if marker not in markers:
         markers.append(marker)
     out["degraded"] = markers
+
+
+def _append_marker(out: dict[str, Any], marker: str) -> None:
+    """Append `marker` to `out['degraded']` (deduped, order-preserving)."""
+    markers = list(out.get("degraded") or [])
+    if marker not in markers:
+        markers.append(marker)
+    out["degraded"] = markers
+
+
+def _record_structured_retry(chat: Any, out: dict[str, Any], *, node: str) -> None:
+    """Append `structured_retry:<node>` when invoke_typed needed >1 attempt."""
+    attempts = getattr(chat, "last_structured_attempts", 1) or 1
+    if attempts > 1:
+        _append_marker(out, f"structured_retry:{node}")
 
 
 _ROUTER_FALLBACK = {
@@ -423,13 +439,19 @@ def reflect_on_evidence(state: AgentState) -> dict[str, Any]:
 
     user_text = _last_user_text(state["messages"])
     chat = get_chat_provider()
+    settings = get_settings()
     prompt = REFLECTION_PROMPT.format(
         user_message=user_text,
         evidence_summary=_evidence_summary(state),
     )
+    structured_failed = False
     try:
-        verdict = chat.invoke_typed(prompt, EvidenceReflection)
+        verdict = invoke_typed_with_retry(
+            chat, prompt, EvidenceReflection,
+            max_attempts=settings.structured_retry_max_attempts,
+        )
     except ValueError:
+        structured_failed = True
         verdict = EvidenceReflection(
             sufficient=False,
             missing=["grounded sources"],
@@ -440,7 +462,10 @@ def reflect_on_evidence(state: AgentState) -> dict[str, Any]:
     out: dict[str, Any] = {"reflection_eval": verdict.model_dump()}
     usage = getattr(chat, "last_usage", None)
     if usage:
-        out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], get_settings())
+        out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], settings)
+    _record_structured_retry(chat, out, node="reflect_on_evidence")
+    if structured_failed:
+        _append_marker(out, "structured_failed:reflect_on_evidence")
     _record_chat_fallback(chat, out)
     return out
 
@@ -591,35 +616,50 @@ def plan_action(state: AgentState) -> dict[str, Any]:
     if not (user_text and agent_text):
         return {"action_plan": dict(_NO_ACTION)}
     chat = get_chat_provider()
+    settings = get_settings()
     routing = state.get("routing") or {}
+    structured_failed = False
     if routing.get("intent_label") == "propose_procedure":
         prompt = PROCEDURE_PROPOSAL_PROMPT.format(
             user_message=user_text, agent_message=agent_text
         )
         try:
-            proposal = chat.invoke_typed(prompt, ProcedureProposal)
+            proposal = invoke_typed_with_retry(
+                chat, prompt, ProcedureProposal,
+                max_attempts=settings.structured_retry_max_attempts,
+            )
         except ValueError:
-            return {"action_plan": dict(_NO_ACTION)}
-        assert isinstance(proposal, ProcedureProposal)
-        if proposal.action_type != "propose_procedure" or not proposal.rule.strip():
             out: dict[str, Any] = {"action_plan": dict(_NO_ACTION)}
+            structured_failed = True
         else:
-            out = {"action_plan": proposal.model_dump()}
+            assert isinstance(proposal, ProcedureProposal)
+            if proposal.action_type != "propose_procedure" or not proposal.rule.strip():
+                out = {"action_plan": dict(_NO_ACTION)}
+            else:
+                out = {"action_plan": proposal.model_dump()}
     else:
         prompt = ACTION_PLANNING_PROMPT.format(
             user_message=user_text, agent_message=agent_text
         )
         try:
-            booking = chat.invoke_typed(prompt, BookingProposal)
+            booking = invoke_typed_with_retry(
+                chat, prompt, BookingProposal,
+                max_attempts=settings.structured_retry_max_attempts,
+            )
         except ValueError:
-            return {"action_plan": dict(_NO_ACTION)}
-        assert isinstance(booking, BookingProposal)
-        if booking.requires_approval is False and "[REQUIRES HUMAN APPROVAL]" in agent_text:
-            booking = booking.model_copy(update={"requires_approval": True})
-        out = {"action_plan": booking.model_dump()}
+            out = {"action_plan": dict(_NO_ACTION)}
+            structured_failed = True
+        else:
+            assert isinstance(booking, BookingProposal)
+            if booking.requires_approval is False and "[REQUIRES HUMAN APPROVAL]" in agent_text:
+                booking = booking.model_copy(update={"requires_approval": True})
+            out = {"action_plan": booking.model_dump()}
     usage = getattr(chat, "last_usage", None)
     if usage:
-        out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], get_settings())
+        out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], settings)
+    _record_structured_retry(chat, out, node="plan_action")
+    if structured_failed:
+        _append_marker(out, "structured_failed:plan_action")
     _record_chat_fallback(chat, out)
     return out
 
@@ -785,11 +825,19 @@ def save_memory(state: AgentState) -> dict[str, Any]:
 
     ctx = state["context"]
     chat = get_chat_provider()
+    settings = get_settings()
     prompt = MEMORY_EXTRACTION_PROMPT.format(user_message=user_text, agent_message=agent_text)
     try:
-        extraction = chat.invoke_typed(prompt, MemoryExtraction)
+        extraction = invoke_typed_with_retry(
+            chat, prompt, MemoryExtraction,
+            max_attempts=settings.structured_retry_max_attempts,
+        )
     except ValueError:
-        return {}
+        out: dict[str, Any] = {}
+        _record_structured_retry(chat, out, node="save_memory")
+        _append_marker(out, "structured_failed:save_memory")
+        _record_chat_fallback(chat, out)
+        return out
     assert isinstance(extraction, MemoryExtraction)
     usage = getattr(chat, "last_usage", None)
 
@@ -812,10 +860,10 @@ def save_memory(state: AgentState) -> dict[str, Any]:
         digest = hashlib.sha1(record["summary"].encode("utf-8")).hexdigest()[:16]
         get_episodic_memory().put(ctx.realm_id, ctx.user_id, key=f"ep_{digest}", episode=record)
 
-    settings = get_settings()
-    out: dict[str, Any] = {}
+    out = {}
     if usage:
         out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], settings)
+    _record_structured_retry(chat, out, node="save_memory")
     _record_chat_fallback(chat, out)
 
     every = settings.reflect_every_n_turns

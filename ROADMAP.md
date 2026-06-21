@@ -10,7 +10,7 @@ which independently arrived at a very similar harness (LangGraph + checkpointed
 state + multi-agent retrieval). We adopt the patterns we don't have, and skip
 the ones that don't apply at our scale.
 
-## P0 — Done
+## Done
 
 ### 1. Think & Plan node + Reflection Agent (bounded loop) ✅
 - **Why:** Today's router picks a retriever set in one shot; on a thin retrieval the LLM answers anyway and `validate_citations` only flags it post hoc. PRINCE's split between *process reflection* (Think & Plan) and *data reflection* (Reflection Agent) catches both failure modes earlier.
@@ -40,19 +40,25 @@ the ones that don't apply at our scale.
 - **Files:** `core/providers/chat/fallback.py` (new), `core/providers/registry.py`, `core/settings.py`, `agent/nodes.py`, `.env.example`, `tests/test_providers.py`.
 - **Acceptance:** ✅ 12 new tests; 148/148 pass. Synthetic-primary-failure test through `reflect_on_evidence` produces a reply *and* a `chat_fallback:openai` marker; non-retryable errors short-circuit; exhausted chain raises a `RuntimeError` summarizing every failure.
 
-## P1 — Next
+### 4. Feed error context back into the agent on structured-output retry ✅
+- **Why:** `plan_action` swallowed `ValueError` on bad JSON; PRINCE feeds the error + invalid output back to the model for self-correction (capped at 3 attempts).
+- **Scope (shipped):**
+  1. `invoke_typed_with_retry(chat, prompt, schema, max_attempts)` in `core/providers/chat/retry.py`; loops up to `max_attempts`, catches `pydantic.ValidationError` and `json.JSONDecodeError`, and appends the prior error message + offending output into the next prompt iteration.
+  2. `StructuredOutputRetryError(ValueError)` raised on exhaustion so node-level `except ValueError` paths keep degrading cleanly; `last_structured_attempts` exposed on the provider for observability.
+  3. Wired into `reflect_on_evidence`, `plan_action`, and `save_memory` in `agent/nodes.py`; emits `structured_retry:<node>` when a retry occurred and `structured_failed:<node>` when all attempts exhausted (state degrades, turn does not crash).
+  4. `STRUCTURED_RETRY_MAX_ATTEMPTS` (default 3) added to `core/settings.py` and `.env.example`.
+  5. Composes with `FallbackChatProvider` — the retry budget runs per chain invocation, not per provider.
+- **Files:** `core/providers/chat/retry.py` (new), `agent/nodes.py`, `core/settings.py`, `.env.example`, `tests/test_providers.py`.
+- **Acceptance:** ✅ 8 new tests; 156/156 pass. Malformed-then-valid case returns the parsed object on attempt 2 with `structured_retry:plan_action` marker; exhausted case returns `_NO_ACTION` with `structured_failed:plan_action` marker; retry budget forwards through `FallbackChatProvider` chains.
 
-### 4. Feed error context back into the agent on structured-output retry
-- **Why:** `plan_action` swallows `ValueError` on bad JSON; PRINCE feeds the error + invalid output back to the model for self-correction (capped at 3 attempts).
-- **Scope:** New `invoke_typed_with_retry(prompt, schema, max_attempts=3)` on `ChatProvider`; passes previous error message and bad output into the next prompt iteration.
-- **Files:** `core/protocols.py`, `core/providers/chat/grove.py`, `agent/nodes.py` (`plan_action`).
-- **Acceptance:** Test where the first JSON is malformed but the second succeeds; production success rate on `plan_action` improves.
-
-### 5. Live-traffic evaluation (daily batch)
+### 5. Live-traffic evaluation (daily batch) ✅
 - **Why:** Baseline evals catch known regressions; live-traffic evals catch drift.
-- **Scope:** `tools/eval_live_traffic.py` reads last 24h of `checkpoints`, replays retrieved chunks + responses through judge prompts (Faithfulness, Answer Relevancy, Context Relevancy), writes scores to `eval_runs`. Cron / GitHub Action friendly.
-- **Files:** `tools/eval_live_traffic.py` (new), `evals/judges.py` (new), `db/indexes.py`.
-- **Acceptance:** Script produces a JSON summary; dashboard query returns last 7 days of scores.
+- **Scope (shipped):**
+  1. `evals/judges.py` — three LLM-as-judge scorers (`judge_faithfulness`, `judge_answer_relevancy`, `judge_context_relevancy`) returning a clipped `JudgeScore(score 0-1, reason)`; each runs through `invoke_typed_with_retry` so malformed replies self-correct, with a sentinel 0-score on exhaustion.
+  2. `tools/eval_live_traffic.py` — CLI that iterates `MongoDBSaver.list(None)` newest-first, dedupes to one terminal checkpoint per `thread_id` inside a rolling window (default 24h), extracts `(last HumanMessage, last AIMessage, joined *_context channels)`, runs the three judges per turn, and writes one `eval_runs` document `{run_id, run_at, window_hours, n_turns, scores: {judge: {mean, n}}, per_turn: [...]}`. Supports `--window-hours`, `--limit`, `--dry-run`, `--out`.
+  3. `agent/memory.py` — new `EVAL_RUNS_COLLECTION` constant; `db/indexes.py` — `ensure_eval_runs_index()` provisions the collection and creates `run_at_-1` for the last-7-days dashboard query (wired into `db.indexes` main).
+- **Files:** `evals/judges.py` (new), `tools/eval_live_traffic.py` (new), `agent/memory.py`, `db/indexes.py`, `tests/test_evals_live_traffic.py` (new).
+- **Acceptance:** ✅ 20 new tests; 176/176 pass. Extractor drops partial states, dedupes by `thread_id`, filters outside the window, and respects `--limit`. Aggregator returns per-judge mean + n (zero-safe on empty input). Judges parse fake LLM output and fall back to a 0-score sentinel after retries exhausted.
 
 ## P2 — Quality of life
 
@@ -84,6 +90,7 @@ the ones that don't apply at our scale.
 
 ## Sequencing rationale
 
-P0/P1 deliver the highest user-visible quality gains (T&P + Reflection, hybrid
-RAG, cross-provider fallback). P2 sharpens trust and operability without
+Items 1-5 deliver the highest user-visible quality gains (T&P + Reflection,
+hybrid RAG, cross-provider fallback, self-correcting structured output, and
+live-traffic drift detection). P2 sharpens trust and operability without
 reshaping the agent. P3 is on standby until product scope demands it.

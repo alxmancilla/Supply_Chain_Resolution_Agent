@@ -344,6 +344,153 @@ def test_reflect_on_evidence_emits_chat_fallback_marker(monkeypatch):
     assert "chat_fallback:openai" in out["degraded"]
 
 
+# ----------------------- Structured-output retry (item #4) ------------------
+
+
+def test_invoke_typed_with_retry_returns_on_first_attempt():
+    from core.providers.chat.retry import invoke_typed_with_retry
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        v: int
+
+    chat = FakeChatProvider(reply='{"v": 1}')
+    result = invoke_typed_with_retry(chat, "prompt", Out, max_attempts=3)
+    assert isinstance(result, Out) and result.v == 1
+    assert chat.last_structured_attempts == 1
+    assert len(chat.calls) == 1
+
+
+def test_invoke_typed_with_retry_recovers_after_bad_json():
+    from core.providers.chat.retry import invoke_typed_with_retry
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        v: int
+
+    chat = FakeChatProvider(replies=["not-json-at-all", '{"v": 7}'])
+    result = invoke_typed_with_retry(chat, "prompt", Out, max_attempts=3)
+    assert isinstance(result, Out) and result.v == 7
+    assert chat.last_structured_attempts == 2
+    # Second attempt receives an augmented prompt with the parse error.
+    assert "could not be parsed" in chat.calls[1]
+    assert chat.calls[1].startswith("prompt")
+
+
+def test_invoke_typed_with_retry_raises_after_exhaustion():
+    from core.providers.chat.retry import (
+        StructuredOutputRetryError,
+        invoke_typed_with_retry,
+    )
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        v: int
+
+    chat = FakeChatProvider(reply="never-json")
+    with pytest.raises(StructuredOutputRetryError, match="retry exhausted after 3"):
+        invoke_typed_with_retry(chat, "prompt", Out, max_attempts=3)
+    assert chat.last_structured_attempts == 3
+    assert len(chat.calls) == 3
+
+
+def test_invoke_typed_with_retry_is_value_error_subclass():
+    from core.providers.chat.retry import StructuredOutputRetryError
+
+    err = StructuredOutputRetryError("x", attempts=3, last_error=ValueError("bad"))
+    assert isinstance(err, ValueError)
+    assert err.attempts == 3
+    assert isinstance(err.last_error, ValueError)
+
+
+def test_invoke_typed_with_retry_rejects_zero_max_attempts():
+    from core.providers.chat.retry import invoke_typed_with_retry
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        v: int
+
+    chat = FakeChatProvider(reply='{"v": 1}')
+    with pytest.raises(ValueError, match="max_attempts"):
+        invoke_typed_with_retry(chat, "p", Out, max_attempts=0)
+
+
+def test_invoke_typed_with_retry_forwards_through_fallback_chain():
+    """Retry budget composes with the fallback chain orthogonally."""
+    from core.providers.chat.fallback import FallbackChatProvider
+    from core.providers.chat.retry import invoke_typed_with_retry
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        v: int
+
+    primary = FakeChatProvider(raise_exc=RateLimitError("rate limited"))
+    secondary = FakeChatProvider(replies=["garbage", '{"v": 9}'])
+    chain = FallbackChatProvider(("grove", primary), ("openai", secondary))
+    result = invoke_typed_with_retry(chain, "prompt", Out, max_attempts=3)
+    assert isinstance(result, Out) and result.v == 9
+    # Two retry attempts (garbage -> valid) were needed on top of the fallback.
+    assert chain.last_structured_attempts == 2
+    assert chain.last_fallback == "openai"
+
+
+def test_plan_action_emits_structured_retry_marker_when_retried(monkeypatch):
+    """Acceptance: plan_action surfaces structured_retry:<node> in degraded."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from agent import nodes
+    from core.settings import AgentContext, Settings
+
+    valid = (
+        '{"action_type": "create_booking_draft", "carrier": "A", "lane": "TX-AZ",'
+        ' "weight_lb": 1000, "estimated_cost_usd": 500, "requires_approval": false,'
+        ' "rationale": "r"}'
+    )
+    chat = FakeChatProvider(replies=["not-json", valid])
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    monkeypatch.setattr(
+        nodes, "get_settings",
+        lambda: Settings(mongodb_uri="mongodb://localhost:27017/test"),
+    )
+    state = {
+        "messages": [
+            HumanMessage(content="ship 1000 lb to Phoenix"),
+            AIMessage(content="Carrier A is your option."),
+        ],
+        "context": AgentContext(realm_id="r", user_id="u", agent_id="a"),
+        "routing": {"intent_label": "recommend_shipment", "branches": ["rag"]},
+    }
+    out = nodes.plan_action(state)
+    assert out["action_plan"]["action_type"] == "create_booking_draft"
+    assert "structured_retry:plan_action" in out["degraded"]
+
+
+def test_plan_action_emits_structured_failed_marker_when_exhausted(monkeypatch):
+    """Acceptance: exhausted retry budget degrades cleanly without crashing."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from agent import nodes
+    from core.settings import AgentContext, Settings
+
+    chat = FakeChatProvider(reply="never-json")
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    monkeypatch.setattr(
+        nodes, "get_settings",
+        lambda: Settings(mongodb_uri="mongodb://localhost:27017/test"),
+    )
+    state = {
+        "messages": [
+            HumanMessage(content="ship 1000 lb to Phoenix"),
+            AIMessage(content="Carrier A."),
+        ],
+        "context": AgentContext(realm_id="r", user_id="u", agent_id="a"),
+        "routing": {"intent_label": "recommend_shipment", "branches": ["rag"]},
+    }
+    out = nodes.plan_action(state)
+    assert out["action_plan"] == {"action_type": "none"}
+    assert "structured_failed:plan_action" in out["degraded"]
+
+
 def test_timed_decorator_records_latency_and_opens_span_safely():
     from core.latency import timed
     from core.settings import AgentContext

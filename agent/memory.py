@@ -32,6 +32,7 @@ KG_SLAS_COLLECTION = "kg_slas"
 KG_SERVES_COLLECTION = "kg_serves"
 BOOKING_DRAFTS_COLLECTION = "booking_drafts"
 PROCEDURE_PROPOSALS_COLLECTION = "procedure_proposals"
+EVAL_RUNS_COLLECTION = "eval_runs"
 
 KNOWLEDGE_VECTOR_INDEX = "knowledge_corpus_vector"
 MEMORIES_VECTOR_INDEX = "agent_memories_vector"

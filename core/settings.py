@@ -82,6 +82,7 @@ class Settings:
     rag_fusion_candidates: int = 20
     rag_rerank_model: str = "rerank-2-lite"
     rag_search_index_name: str = "knowledge_corpus_search"
+    structured_retry_max_attempts: int = 3
 
 
 @lru_cache(maxsize=1)
@@ -115,6 +116,7 @@ def get_settings() -> Settings:
         rag_fusion_candidates=int(os.environ.get("RAG_FUSION_CANDIDATES", "20")),
         rag_rerank_model=os.environ.get("RAG_RERANK_MODEL", "rerank-2-lite"),
         rag_search_index_name=os.environ.get("RAG_SEARCH_INDEX_NAME", "knowledge_corpus_search"),
+        structured_retry_max_attempts=int(os.environ.get("STRUCTURED_RETRY_MAX_ATTEMPTS", "3")),
     )
 
 

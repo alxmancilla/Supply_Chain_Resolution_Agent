@@ -76,6 +76,23 @@ remembers user preferences across sessions.
   errors). Non-retryable errors short-circuit. Each fallback emits a
   `chat_fallback:<provider>` marker into the `degraded` channel for
   the turn so the UI can surface that a backup model answered.
+- **Self-correcting structured-output retry.** When `plan_action`,
+  `save_memory`, or `reflect_on_evidence` ask the chat provider for a
+  typed object and the response fails Pydantic validation or JSON
+  parsing, the next attempt re-prompts with the previous error message
+  and bad output appended (capped at `STRUCTURED_RETRY_MAX_ATTEMPTS`,
+  default 3). Successful retries emit `structured_retry:<node>`;
+  exhausted budgets emit `structured_failed:<node>` and the node
+  degrades to a safe default rather than crashing the turn.
+- **Live-traffic evaluation (daily batch).** `python -m
+  tools.eval_live_traffic` walks the last 24h of MongoDB checkpoints
+  (one terminal checkpoint per `thread_id`), reconstructs each turn's
+  `(question, answer, retrieved context)`, and scores it with three
+  LLM-as-judge prompts — Faithfulness (claims supported by context),
+  Answer Relevancy (does the reply address the question), Context
+  Relevancy (is retrieved context on-topic). Per-judge means + every
+  per-turn detail land in a single `eval_runs` document, suitable for
+  a cron / GitHub Action and a 7-day dashboard.
 - **Eval harness with a baseline gate.** `python -m evals.runner` scores
   four suites (intent accuracy, RAG recall, KG row-match, and action
   planning) and exits non-zero if any score drops vs. the committed
@@ -155,7 +172,8 @@ for tests, so backends and providers are swappable.
 │   │   ├── embeddings/voyage.py #     Voyage voyage-4 (1024-dim)
 │   │   └── chat/
 │   │       ├── grove.py         #     Grove GPT-5.5
-│   │       └── fallback.py      #     FallbackChatProvider + retryable-error classifier
+│   │       ├── fallback.py      #     FallbackChatProvider + retryable-error classifier
+│   │       └── retry.py         #     invoke_typed_with_retry (self-correcting structured output)
 │   ├── rag/mongo.py             #   $vectorSearch over knowledge_corpus
 │   ├── kg/                      #   $graphLookup + entity extractor
 │   └── memory/
@@ -170,16 +188,18 @@ for tests, so backends and providers are swappable.
 ├── db/indexes.py                # Creates vector + b-tree indexes
 ├── evals/                       # Offline eval suite
 │   ├── runner.py                #   CLI: --mode {fast,live,latency}
+│   ├── judges.py                #   LLM-as-judge scorers (faithfulness, answer/context relevancy)
 │   ├── metrics/                 #   intent_accuracy, rag_recall_at_k, kg_row_match,
 │   │                            #   action_planning_accuracy, latency_p50_p95
 │   ├── baseline.json            #   Committed live scores (4-metric suite)
 │   ├── latency_baseline.json    #   Committed latency-mode p50/p95 sample
 │   └── datasets/*.jsonl         #   20 + 13 + 6 + 6 + 5 labeled cases
-├── tests/                       # 148 unit tests (in-memory fakes, no Atlas)
+├── tests/                       # 176 unit tests (in-memory fakes, no Atlas)
 ├── tools/
 │   ├── demo.py                  #   One-turn end-to-end demo
 │   ├── smoke_turn.py            #   End-to-end 3-turn smoke
 │   ├── reflect.py               #   Run the consolidation pass
+│   ├── eval_live_traffic.py     #   Daily judge pass over recent checkpoints → eval_runs
 │   └── cleanup_memories.py      #   Delete LTM rows
 ├── requirements.txt
 └── .env.example
@@ -319,26 +339,52 @@ per group, writes that as a `canon_…` row, and soft-deletes the
 originals. Prints how many clusters, canonicals, and tombstones were
 produced.
 
+### Live-traffic eval (daily batch)
+
+```bash
+python -m tools.eval_live_traffic                                  # last 24h → eval_runs
+python -m tools.eval_live_traffic --window-hours 24 --limit 50     # cap turns scored
+python -m tools.eval_live_traffic --dry-run --out /tmp/run.json    # don't write to Atlas
+```
+
+Walks `MongoDBSaver.list(None)` newest-first, dedupes to one terminal
+checkpoint per `thread_id` inside the window, extracts the last
+`(HumanMessage, AIMessage, joined *_context channels)` from
+`channel_values`, and runs three judges per turn — Faithfulness,
+Answer Relevancy, Context Relevancy. Writes a single `eval_runs`
+document with per-judge `{mean, n}` plus full per-turn detail and
+also prints it to stdout. A `run_at_-1` index (created by
+`python -m db.indexes`) backs the last-7-days dashboard query.
+
 ### Unit tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-148 tests covering the retrievers, the router, the KG layer, the
-provider protocols (including settings-driven model-name overrides
-and the cross-provider `FallbackChatProvider` chain — classifier,
+176 tests covering the retrievers, the router, the KG layer, the
+provider protocols (including settings-driven model-name overrides,
+the cross-provider `FallbackChatProvider` chain — classifier,
 retryable→fallback, non-retryable short-circuit, exhausted-chain
 error, registry composition, and the `chat_fallback:<provider>`
-marker emitted by `reflect_on_evidence`), the hybrid RAG path
-(vector + BM25 RRF + reranker), the think-and-plan / reflection
-loop, memory dedup + tombstones, the reflector (both the standalone
-clustering pass and the in-graph `REFLECT_EVERY_N_TURNS` trigger),
-the streamed `generate_response` path (TTFT included), the citation
+marker emitted by `reflect_on_evidence` — and the self-correcting
+`invoke_typed_with_retry` path: first-attempt success, recovery
+after malformed JSON, exhaustion with `StructuredOutputRetryError`,
+composition through the fallback chain, and the
+`structured_retry:plan_action` / `structured_failed:plan_action`
+markers surfaced from the node), the hybrid RAG path (vector +
+BM25 RRF + reranker), the think-and-plan / reflection loop, memory
+dedup + tombstones, the reflector (both the standalone clustering
+pass and the in-graph `REFLECT_EVERY_N_TURNS` trigger), the
+streamed `generate_response` path (TTFT included), the citation
 validator, the token/cost accounting helpers + per-node usage
-plumbing, and the eval harness in fast mode (including latency
-percentile math and `--against` baseline diffing). Runs against
-in-memory fakes — no Atlas, Voyage, or Grove credentials needed.
+plumbing, the eval harness in fast mode (including latency
+percentile math and `--against` baseline diffing), and the
+live-traffic eval pipeline (`JudgeScore` clipping, judge prompt
+shapes, parse-failure fallback to a 0-score sentinel, checkpoint
+extraction over a synthetic `MongoDBSaver`, window/limit/dedup
+behaviour, and the mean/n aggregator). Runs against in-memory
+fakes — no Atlas, Voyage, or Grove credentials needed.
 
 ## Configuration
 
@@ -361,6 +407,7 @@ in-memory fakes — no Atlas, Voyage, or Grove credentials needed.
 | `CHAT_OUTPUT_PRICE_PER_1K_USD` | Per-1k output-token price (same)                        | `0.0`                    |
 | `REFLECT_EVERY_N_TURNS`     | When > 0, `save_memory` runs `LLMMemoryReflector` against semantic + episodic LTM every N successful turns per (realm, user); 0 keeps reflection a manual `tools/reflect.py` job | `0` |
 | `REFLECT_THRESHOLD`         | Cosine threshold passed to the in-graph reflector when scheduling is on | `0.88`                   |
+| `STRUCTURED_RETRY_MAX_ATTEMPTS` | Max attempts for `invoke_typed_with_retry` (re-prompt with the prior parse error on `pydantic.ValidationError` / `json.JSONDecodeError`); 1 disables retries | `3` |
 | `OTEL_ENABLED`              | When `1`, configure an OTLP exporter on startup; otherwise the per-node spans are no-ops | `0` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Standard OTel collector endpoint (used when `OTEL_ENABLED=1`) | *(unset)*               |
 
@@ -410,6 +457,46 @@ python -m tools.cleanup_memories --type procedural --realm <realm_id> --yes
   `degraded` channel for the turn. The streaming path
   (`generate_response`) uses `chat.underlying()` and bypasses the
   wrapper — mid-stream failover is not supported.
+- **Self-correcting structured output.**
+  `core/providers/chat/retry.py` exposes
+  `invoke_typed_with_retry(chat, prompt, schema, max_attempts)`. On
+  `pydantic.ValidationError` or `json.JSONDecodeError` it re-prompts
+  the model with the offending output and the exact parser error
+  appended, looping up to `STRUCTURED_RETRY_MAX_ATTEMPTS` (default 3).
+  Exhaustion raises `StructuredOutputRetryError(ValueError)` so the
+  node's existing `except ValueError` paths degrade cleanly to safe
+  defaults (`_NO_ACTION` in `plan_action`, one-rescue-pass verdict in
+  `reflect_on_evidence`, no-write in `save_memory`). Each node emits
+  `structured_retry:<node>` when a retry actually happened and
+  `structured_failed:<node>` when the budget was exhausted, both into
+  the `degraded` channel for the turn. The helper composes with
+  `FallbackChatProvider` — the retry budget runs per chain invocation,
+  so a malformed reply from one provider doesn't burn a retry on the
+  next one, and `last_structured_attempts` is forwarded so the marker
+  reports accurate attempt counts even after a failover.
+- **Live-traffic evaluation.** `tools/eval_live_traffic.py` is the
+  offline-quality counterpart to the regression-gate eval harness:
+  while `evals/runner.py` scores a fixed labeled dataset, this CLI
+  scores whatever actually went through the agent in the last
+  `--window-hours` (default 24). It walks `MongoDBSaver.list(None)`
+  newest-first, keeps exactly one terminal checkpoint per
+  `thread_id` inside the window, extracts the last `HumanMessage` +
+  last `AIMessage` from `channel_values.messages`, joins every
+  populated `*_context` channel (`rag_context`, `kg_context`,
+  `ltm_context`, `episodic_context`, `procedural_context`) as the
+  retrieved-context bundle, and skips partial states (missing
+  question, missing reply, or blank content). Each turn is scored
+  by three LLM judges in `evals/judges.py` — Faithfulness, Answer
+  Relevancy, Context Relevancy. Each judge runs through
+  `invoke_typed_with_retry`, so a malformed judge reply self-corrects
+  inside the budget and falls back to a 0-score sentinel with
+  `judge_parse_failed: …` reason on exhaustion (the daily batch
+  never crashes on a single bad turn). One `eval_runs` document is
+  written per run: `{run_id, run_at, window_hours, n_turns, scores:
+  {judge: {mean, n}}, per_turn: [...]}`, backed by a descending
+  `run_at_-1` index for the last-7-days dashboard query
+  (provisioned by `db/indexes.py`). `--dry-run` skips the insert;
+  `--out <path>` also writes the JSON to disk.
 - **Memory write path.** Each turn, `save_memory` runs **one**
   structured-output call against the chat provider to extract facts +
   one episode summary, then writes them through the dedup-aware `put`:

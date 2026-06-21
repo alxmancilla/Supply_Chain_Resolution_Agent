@@ -24,6 +24,7 @@ from agent.memory import (
     EMBEDDING_DIMS,
     EPISODES_COLLECTION,
     EPISODES_VECTOR_INDEX,
+    EVAL_RUNS_COLLECTION,
     KG_CARRIERS_COLLECTION,
     KG_LANES_COLLECTION,
     KG_SERVES_COLLECTION,
@@ -192,12 +193,32 @@ def ensure_kg_indexes() -> None:
         print(f"[{coll_name}] created index '{idx_name}'.")
 
 
+def ensure_eval_runs_index() -> None:
+    """Provision the `eval_runs` collection + a descending index on `run_at`.
+
+    Backs the dashboard query "last 7 days of live-traffic judge scores"
+    written by `tools.eval_live_traffic`.
+    """
+    db = get_mongo_client()[DB_NAME]
+    if EVAL_RUNS_COLLECTION not in db.list_collection_names():
+        db.create_collection(EVAL_RUNS_COLLECTION)
+    coll = db[EVAL_RUNS_COLLECTION]
+    idx_name = "run_at_-1"
+    existing = {ix["name"] for ix in coll.list_indexes()}
+    if idx_name in existing:
+        print(f"[{EVAL_RUNS_COLLECTION}] '{idx_name}' already exists — skipping.")
+        return
+    coll.create_index([("run_at", -1)], name=idx_name)
+    print(f"[{EVAL_RUNS_COLLECTION}] created index '{idx_name}'.")
+
+
 def main() -> None:
     ensure_knowledge_index()
     ensure_knowledge_search_index()
     ensure_memories_index()
     ensure_episodes_index()
     ensure_kg_indexes()
+    ensure_eval_runs_index()
 
 
 if __name__ == "__main__":
