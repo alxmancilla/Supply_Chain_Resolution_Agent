@@ -61,6 +61,14 @@ class KnowledgeRetriever(Protocol):
 
 
 @runtime_checkable
+class Reranker(Protocol):
+    """Cross-encoder-style reranker applied to a candidate hit list."""
+
+    def rerank(self, query: str, hits: Sequence[KnowledgeHit], *, top_k: int) -> Sequence[KnowledgeHit]:
+        ...
+
+
+@runtime_checkable
 class IntentRouter(Protocol):
     """Decides which retrieval branches to activate for a given user turn."""
 

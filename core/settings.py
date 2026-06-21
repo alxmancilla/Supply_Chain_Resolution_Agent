@@ -36,6 +36,13 @@ def _env_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     return value
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Process-wide configuration. Loaded once from env."""
@@ -54,6 +61,13 @@ class Settings:
     chat_output_price_per_1k_usd: float = 0.0
     reflect_every_n_turns: int = 0
     reflect_threshold: float = 0.88
+    rag_hybrid_enabled: bool = False
+    rag_rerank_enabled: bool = False
+    rag_vector_weight: float = 1.0
+    rag_bm25_weight: float = 1.0
+    rag_fusion_candidates: int = 20
+    rag_rerank_model: str = "rerank-2-lite"
+    rag_search_index_name: str = "knowledge_corpus_search"
 
 
 @lru_cache(maxsize=1)
@@ -79,6 +93,13 @@ def get_settings() -> Settings:
         chat_output_price_per_1k_usd=float(os.environ.get("CHAT_OUTPUT_PRICE_PER_1K_USD", "0.0")),
         reflect_every_n_turns=int(os.environ.get("REFLECT_EVERY_N_TURNS", "0")),
         reflect_threshold=float(os.environ.get("REFLECT_THRESHOLD", "0.88")),
+        rag_hybrid_enabled=_env_bool("RAG_HYBRID_ENABLED", False),
+        rag_rerank_enabled=_env_bool("RAG_RERANK_ENABLED", False),
+        rag_vector_weight=float(os.environ.get("RAG_VECTOR_WEIGHT", "1.0")),
+        rag_bm25_weight=float(os.environ.get("RAG_BM25_WEIGHT", "1.0")),
+        rag_fusion_candidates=int(os.environ.get("RAG_FUSION_CANDIDATES", "20")),
+        rag_rerank_model=os.environ.get("RAG_RERANK_MODEL", "rerank-2-lite"),
+        rag_search_index_name=os.environ.get("RAG_SEARCH_INDEX_NAME", "knowledge_corpus_search"),
     )
 
 

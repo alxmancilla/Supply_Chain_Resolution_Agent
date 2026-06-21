@@ -205,6 +205,21 @@ class EvidenceReflection(BaseModel):
     rationale: str = ""
 
 
+class RagQueryFilters(BaseModel):
+    """Structured filters extracted from a natural-language RAG query.
+
+    Used by `MongoKnowledgeRetriever` to constrain both the `$vectorSearch`
+    pre-filter and the `$search` compound clause so retrieval narrows on
+    the lanes/carriers/doc_types the user actually asked about.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    lanes: list[str] = Field(default_factory=list)
+    carriers: list[str] = Field(default_factory=list)
+    doc_types: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
 __all__ = [
     "SemanticFact",
     "Episode",
@@ -225,4 +240,5 @@ __all__ = [
     "ProcedureProposal",
     "ResearchPlan",
     "EvidenceReflection",
+    "RagQueryFilters",
 ]

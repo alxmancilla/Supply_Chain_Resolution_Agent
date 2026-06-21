@@ -606,3 +606,176 @@ def test_graph_wires_think_and_plan_and_reflection_loop(monkeypatch):
     nodes_set = set(g.get_graph().nodes.keys())
     assert {"think_and_plan", "reflect_on_evidence"}.issubset(nodes_set)
 
+
+
+# ---------------------- RAG hybrid + planner + reranker ----------------------
+
+
+def test_query_planner_extracts_lane_and_carrier():
+    from core.rag.query_planner import plan_query
+
+    filters = plan_query("Carrier A weight threshold on TX-AZ shipments")
+    assert "TX-AZ" in filters.lanes
+    assert "Carrier A" in filters.carriers
+    assert "lanes=" in filters.rationale
+
+
+def test_query_planner_detects_doc_type_hints():
+    from core.rag.query_planner import plan_query
+
+    filters = plan_query("How do I handle a late delivery exception?")
+    assert "exception_playbook" in filters.doc_types
+
+
+def test_query_planner_empty_query_returns_empty_filters():
+    from core.rag.query_planner import plan_query
+
+    filters = plan_query("")
+    assert filters.lanes == [] and filters.carriers == [] and filters.doc_types == []
+
+
+def test_null_reranker_preserves_order_and_trims():
+    from core.rag.rerank import NullReranker
+    from core.schemas import KnowledgeHit
+
+    hits = [
+        KnowledgeHit(doc_type="x", source=f"s{i}", text=f"t{i}", score=1.0 - i * 0.1, metadata={})
+        for i in range(4)
+    ]
+    out = NullReranker().rerank("q", hits, top_k=2)
+    assert [h.source for h in out] == ["s0", "s1"]
+
+
+def test_voyage_reranker_uses_relevance_score(monkeypatch):
+    from core.rag.rerank import VoyageReranker
+    from core.schemas import KnowledgeHit
+
+    class _Entry:
+        def __init__(self, index, score):
+            self.index = index
+            self.relevance_score = score
+
+    class _Result:
+        def __init__(self, entries):
+            self.results = entries
+
+    class _FakeClient:
+        def rerank(self, *, query, documents, model, top_k):  # noqa: ARG002
+            # Returns reversed input order with descending relevance scores
+            # so we verify both the re-ordering and the score replacement.
+            n = len(documents)
+            return _Result([_Entry(n - 1 - rank, 1.0 - rank * 0.1) for rank in range(n)])
+
+    hits = [
+        KnowledgeHit(doc_type="x", source=f"s{i}", text=f"t{i}", score=0.5, metadata={})
+        for i in range(3)
+    ]
+    reranker = VoyageReranker(client=_FakeClient())
+    out = reranker.rerank("q", hits, top_k=3)
+    assert [h.source for h in out] == ["s2", "s1", "s0"]
+    assert out[0].score == 1.0
+    assert out[1].score == 0.9
+
+
+def test_rrf_fusion_prefers_documents_present_in_both_lists():
+    from core.rag.mongo import _rrf_fuse
+    from core.schemas import KnowledgeHit
+
+    def _hit(source, chunk_index):
+        return KnowledgeHit(
+            doc_type="route_guide", source=source, text=f"text-{source}-{chunk_index}",
+            score=0.0, metadata={"chunk_index": chunk_index, "lanes": ["TX-AZ"]},
+        )
+    # Note: hit identity is (source, chunk_index). Set chunk_index at top-level via extra-allow.
+    a = KnowledgeHit(doc_type="x", source="shared", text="t", score=0.0, metadata={}, chunk_index=0)
+    b = KnowledgeHit(doc_type="x", source="only_vec", text="t", score=0.0, metadata={}, chunk_index=0)
+    c = KnowledgeHit(doc_type="x", source="only_bm25", text="t", score=0.0, metadata={}, chunk_index=0)
+    fused = _rrf_fuse([a, b], [a, c], vector_weight=1.0, bm25_weight=1.0)
+    assert fused[0].source == "shared"
+    assert {h.source for h in fused} == {"shared", "only_vec", "only_bm25"}
+
+
+def test_hybrid_retriever_runs_both_pipelines_and_dedups(monkeypatch):
+    from core.rag.mongo import MongoKnowledgeRetriever
+    from tests.fakes import FakeEmbeddings
+
+    class _CapturingCollection:
+        def __init__(self):
+            self.pipelines: list[list[dict]] = []
+            self._vector_hits = [
+                {"doc_type": "route_guide", "source": "tx_az_lane.pdf",
+                 "chunk_index": 0, "text": "Carrier A TX-AZ primary",
+                 "metadata": {"lanes": ["TX-AZ"], "carriers": ["Carrier A"]}, "score": 0.8},
+            ]
+            self._bm25_hits = [
+                {"doc_type": "route_guide", "source": "tx_az_lane.pdf",
+                 "chunk_index": 0, "text": "Carrier A TX-AZ primary",
+                 "metadata": {"lanes": ["TX-AZ"], "carriers": ["Carrier A"]}, "score": 12.3},
+                {"doc_type": "carrier_sla", "source": "carrier_a_2026.pdf",
+                 "chunk_index": 1, "text": "fuel surcharge structure TX-AZ Carrier A",
+                 "metadata": {"lanes": ["TX-AZ", "TX-TX"], "carriers": ["Carrier A"]},
+                 "score": 9.1},
+            ]
+
+        def aggregate(self, pipeline):
+            self.pipelines.append(pipeline)
+            stages = {next(iter(s)) for s in pipeline}
+            if "$vectorSearch" in stages:
+                return iter(self._vector_hits)
+            if "$search" in stages:
+                return iter(self._bm25_hits)
+            return iter([])
+
+    coll = _CapturingCollection()
+    retriever = MongoKnowledgeRetriever(
+        collection=coll, embeddings=FakeEmbeddings(),
+        index_name="vec_idx", search_index_name="search_idx",
+        hybrid_enabled=True, fusion_candidates=10,
+    )
+    hits = retriever.query(realm_id="r1", text="Carrier A surcharge on TX-AZ", k=5)
+    sources = [h.source for h in hits]
+    assert "tx_az_lane.pdf" in sources and "carrier_a_2026.pdf" in sources
+    assert sources.count("tx_az_lane.pdf") == 1
+    # Verified both stages were invoked.
+    stage_sets = [{next(iter(s)) for s in p} for p in coll.pipelines]
+    assert any("$vectorSearch" in s for s in stage_sets)
+    assert any("$search" in s for s in stage_sets)
+
+
+def test_vector_only_retriever_post_filters_on_lane(monkeypatch):
+    from core.rag.mongo import MongoKnowledgeRetriever
+    from tests.fakes import FakeEmbeddings
+
+    class _Collection:
+        def aggregate(self, _pipeline):
+            return iter([
+                {"doc_type": "route_guide", "source": "tx_az_lane.pdf", "chunk_index": 0,
+                 "text": "TX-AZ guide", "metadata": {"lanes": ["TX-AZ"]}, "score": 0.9},
+                {"doc_type": "route_guide", "source": "tx_ca_lane.pdf", "chunk_index": 0,
+                 "text": "TX-CA guide", "metadata": {"lanes": ["TX-CA"]}, "score": 0.8},
+            ])
+
+    retriever = MongoKnowledgeRetriever(
+        collection=_Collection(), embeddings=FakeEmbeddings(), index_name="vec_idx",
+    )
+    hits = retriever.query(realm_id="r1", text="What about TX-AZ?", k=5)
+    assert [h.source for h in hits] == ["tx_az_lane.pdf"]
+
+
+def test_post_filter_falls_back_when_filter_eliminates_all():
+    from core.rag.mongo import MongoKnowledgeRetriever
+    from tests.fakes import FakeEmbeddings
+
+    class _Collection:
+        def aggregate(self, _pipeline):
+            return iter([
+                {"doc_type": "route_guide", "source": "tx_ca_lane.pdf", "chunk_index": 0,
+                 "text": "TX-CA guide", "metadata": {"lanes": ["TX-CA"]}, "score": 0.8},
+            ])
+
+    retriever = MongoKnowledgeRetriever(
+        collection=_Collection(), embeddings=FakeEmbeddings(), index_name="vec_idx",
+    )
+    # Query mentions TX-AZ but only TX-CA chunk exists → fallback returns the candidate set.
+    hits = retriever.query(realm_id="r1", text="TX-AZ shipments", k=5)
+    assert [h.source for h in hits] == ["tx_ca_lane.pdf"]

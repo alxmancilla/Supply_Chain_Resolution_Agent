@@ -47,7 +47,28 @@ KNOWLEDGE_INDEX_DEFINITION = {
         },
         {"type": "filter", "path": "realm_id"},
         {"type": "filter", "path": "doc_type"},
+        {"type": "filter", "path": "metadata.lanes"},
+        {"type": "filter", "path": "metadata.carriers"},
     ]
+}
+
+KNOWLEDGE_SEARCH_INDEX_NAME = "knowledge_corpus_search"
+KNOWLEDGE_SEARCH_INDEX_DEFINITION = {
+    "mappings": {
+        "dynamic": False,
+        "fields": {
+            "text": {"type": "string", "analyzer": "lucene.standard"},
+            "realm_id": {"type": "token"},
+            "doc_type": {"type": "token"},
+            "metadata": {
+                "type": "document",
+                "fields": {
+                    "lanes": {"type": "token"},
+                    "carriers": {"type": "token"},
+                },
+            },
+        },
+    }
 }
 
 
@@ -86,6 +107,40 @@ def ensure_knowledge_index() -> None:
                 return
         time.sleep(5)
     print(f"[knowledge_corpus] WARNING: '{KNOWLEDGE_VECTOR_INDEX}' did not become queryable within 10 minutes.")
+
+
+def ensure_knowledge_search_index() -> None:
+    """Create the BM25 Atlas Search index used by the hybrid retriever."""
+    client = get_mongo_client()
+    db = client[DB_NAME]
+    if KNOWLEDGE_COLLECTION not in db.list_collection_names():
+        db.create_collection(KNOWLEDGE_COLLECTION)
+    collection = db[KNOWLEDGE_COLLECTION]
+
+    if _index_exists(collection, KNOWLEDGE_SEARCH_INDEX_NAME):
+        print(f"[knowledge_corpus] '{KNOWLEDGE_SEARCH_INDEX_NAME}' already exists — skipping.")
+        return
+
+    model = SearchIndexModel(
+        definition=KNOWLEDGE_SEARCH_INDEX_DEFINITION,
+        name=KNOWLEDGE_SEARCH_INDEX_NAME,
+        type="search",
+    )
+    try:
+        collection.create_search_index(model=model)
+    except OperationFailure as exc:
+        print(f"[knowledge_corpus] create_search_index (BM25) failed: {exc}", file=sys.stderr)
+        raise
+
+    print(f"[knowledge_corpus] '{KNOWLEDGE_SEARCH_INDEX_NAME}' submitted. Waiting for it to become queryable...")
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        for ix in collection.list_search_indexes():
+            if ix.get("name") == KNOWLEDGE_SEARCH_INDEX_NAME and ix.get("queryable"):
+                print(f"[knowledge_corpus] '{KNOWLEDGE_SEARCH_INDEX_NAME}' is queryable.")
+                return
+        time.sleep(5)
+    print(f"[knowledge_corpus] WARNING: '{KNOWLEDGE_SEARCH_INDEX_NAME}' did not become queryable within 10 minutes.")
 
 
 def ensure_memories_index() -> None:
@@ -139,6 +194,7 @@ def ensure_kg_indexes() -> None:
 
 def main() -> None:
     ensure_knowledge_index()
+    ensure_knowledge_search_index()
     ensure_memories_index()
     ensure_episodes_index()
     ensure_kg_indexes()

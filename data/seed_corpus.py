@@ -21,6 +21,7 @@ from agent.memory import (
     get_mongo_client,
     get_registry_collection,
 )
+from core.rag.query_planner import plan_query
 from core.settings import get_settings
 from data.corpus_content import DOCUMENTS
 
@@ -28,6 +29,30 @@ _SETTINGS = get_settings()
 REALM_ID = _SETTINGS.realm_id
 AGENT_ID = _SETTINGS.agent_id
 EMBED_BATCH = 32
+
+
+def _enrich_metadata(base: dict, paragraph: str) -> dict:
+    """Merge regex-extracted lanes/carriers into the doc's static metadata.
+
+    Lets the hybrid retriever apply per-chunk post-filters on
+    `metadata.lanes` / `metadata.carriers` without re-scanning text at
+    query time. The doc-level `lane` / `carrier` keys are preserved.
+    """
+    enriched = dict(base)
+    filters = plan_query(paragraph)
+    seed_lanes: set[str] = set()
+    if isinstance(enriched.get("lane"), str):
+        seed_lanes.add(enriched["lane"])
+    seed_lanes.update(filters.lanes)
+    seed_carriers: set[str] = set()
+    if isinstance(enriched.get("carrier"), str):
+        seed_carriers.add(enriched["carrier"])
+    seed_carriers.update(filters.carriers)
+    if seed_lanes:
+        enriched["lanes"] = sorted(seed_lanes)
+    if seed_carriers:
+        enriched["carriers"] = sorted(seed_carriers)
+    return enriched
 
 
 def _chunks() -> list[dict]:
@@ -42,7 +67,7 @@ def _chunks() -> list[dict]:
                     "source": doc["source"],
                     "chunk_index": idx,
                     "text": paragraph,
-                    "metadata": dict(doc["metadata"]),
+                    "metadata": _enrich_metadata(doc["metadata"], paragraph),
                 }
             )
     return flat

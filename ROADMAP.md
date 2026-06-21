@@ -18,17 +18,18 @@ the ones that don't apply at our scale.
 - **Files:** `core/schemas.py`, `agent/prompts.py`, `agent/nodes.py`, `agent/graph.py`, `tests/test_nodes.py`, `SKILL.md`.
 - **Acceptance:** ✅ 11 new tests; 127/127 pass (was 116); loop bounded at `MAX_REPLANS=1`.
 
-## P1 — Next
+### 2. RAG pipeline upgrade — hybrid + reranker ✅
+- **Why:** `$vectorSearch` alone leaves recall on the table. PRINCE: metadata filter extraction + hybrid weighted vector/keyword + cross-encoder rerank.
+- **Scope (shipped):**
+  1. Heuristic metadata filter extraction (`core/rag/query_planner.py`) — regex over lanes (`TX-AZ`, `TX-TX`, `TX-CA`, `AZ-CA`, `TX-NM`), carriers (`Carrier A/B/C`), and doc-type keywords.
+  2. Hybrid path in `MongoKnowledgeRetriever`: parallel `$vectorSearch` + `$search` aggregations, fused via weighted reciprocal-rank fusion (RRF, `k=60`); vector-only mode preserved as default.
+  3. Optional `VoyageReranker` (`rerank-2-lite`) wired behind `RAG_RERANK_ENABLED`; `NullReranker` is the no-op default.
+  4. Per-chunk metadata enrichment at ingest (`metadata.lanes`, `metadata.carriers`) so post-filters work without re-scanning text.
+  5. `knowledge_corpus_search` Atlas Search (BM25) index bootstrapped from `db.indexes`; vector index gains `metadata.lanes` / `metadata.carriers` filter fields.
+- **Files:** `core/schemas.py`, `core/protocols.py`, `core/rag/{mongo,query_planner,rerank}.py`, `core/settings.py`, `data/seed_corpus.py`, `db/indexes.py`, `.env.example`, `tests/test_nodes.py`.
+- **Acceptance:** ✅ 9 new tests; 136/136 pass. Vector-only path unchanged when flags off; hybrid + rerank opt-in via env (`RAG_HYBRID_ENABLED`, `RAG_RERANK_ENABLED`).
 
-### 2. RAG pipeline upgrade — hybrid + reranker
-- **Why:** `$vectorSearch` alone leaves recall on the table. PRINCE: metadata filter extraction + n=5 query expansion + hybrid weighted (0.7 vector / 0.3 keyword) + cross-encoder rerank top-20 → top-7.
-- **Scope:**
-  1. Extract metadata filters (e.g. `lane`, `carrier`, `doc_type`) via LLM and inject into `$vectorSearch.filter`.
-  2. Add Atlas `$search` (BM25) phase; fuse via `$rankFusion` (Atlas 8.1+) or manual weighted union.
-  3. Add reranker stage using `voyageai.Client.rerank(model="rerank-2-lite")` after retrieval.
-  4. Tag corpus chunks at ingest with structured metadata (`lane`, `doc_type`, `section`).
-- **Files:** `core/rag/mongo.py`, `data/corpus_content.py`, `data/seed_corpus.py`, `db/indexes.py`, new `core/rag/rerank.py`, new `core/rag/query_planner.py`.
-- **Acceptance:** RAG-recall eval score improves vs. baseline; reranker can be disabled via env var for cost control.
+## P1 — Next
 
 ### 3. Cross-provider LLM fallback
 - **Why:** Provider outages and rate limits happen. PRINCE switches providers after retries.
