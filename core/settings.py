@@ -43,6 +43,19 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_provider_chain(name: str, allowed: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return ()
+    chain = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+    bad = [p for p in chain if p not in allowed]
+    if bad:
+        raise RuntimeError(
+            f"{name}={raw!r} contains unknown providers {bad}; allowed: {allowed}"
+        )
+    return chain
+
+
 @dataclass(frozen=True)
 class Settings:
     """Process-wide configuration. Loaded once from env."""
@@ -53,6 +66,7 @@ class Settings:
     agent_id: str = "supply-chain-resolution-agent"
     embedding_provider: str = "voyage"
     chat_provider: str = "grove"
+    chat_providers: tuple[str, ...] = ()
     embedding_model: str = "voyage-4"
     chat_model: str = "gpt-5.5"
     semantic_dedup_threshold: float = 0.92
@@ -85,6 +99,7 @@ def get_settings() -> Settings:
         agent_id=os.environ.get("AGENT_ID", "supply-chain-resolution-agent"),
         embedding_provider=_env_choice("EMBEDDING_PROVIDER", "voyage", EMBEDDING_PROVIDERS),
         chat_provider=_env_choice("CHAT_PROVIDER", "grove", CHAT_PROVIDERS),
+        chat_providers=_env_provider_chain("CHAT_PROVIDERS", CHAT_PROVIDERS),
         embedding_model=os.environ.get("EMBEDDING_MODEL", "voyage-4"),
         chat_model=os.environ.get("CHAT_MODEL", "gpt-5.5"),
         semantic_dedup_threshold=float(os.environ.get("SEMANTIC_DEDUP_THRESHOLD", "0.92")),

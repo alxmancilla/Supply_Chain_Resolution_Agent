@@ -29,13 +29,18 @@ the ones that don't apply at our scale.
 - **Files:** `core/schemas.py`, `core/protocols.py`, `core/rag/{mongo,query_planner,rerank}.py`, `core/settings.py`, `data/seed_corpus.py`, `db/indexes.py`, `.env.example`, `tests/test_nodes.py`.
 - **Acceptance:** ✅ 9 new tests; 136/136 pass. Vector-only path unchanged when flags off; hybrid + rerank opt-in via env (`RAG_HYBRID_ENABLED`, `RAG_RERANK_ENABLED`).
 
-## P1 — Next
-
-### 3. Cross-provider LLM fallback
+### 3. Cross-provider LLM fallback ✅
 - **Why:** Provider outages and rate limits happen. PRINCE switches providers after retries.
-- **Scope:** `FallbackChatProvider(primary, *secondaries)` wrapper implementing `ChatProvider`; switches on `RateLimitError`, 5xx, `httpx.TimeoutException`; logs fallback to `degraded` channel.
-- **Files:** `core/providers/chat/fallback.py` (new), `core/providers/registry.py`, `core/settings.py`, `tests/test_providers.py`.
-- **Acceptance:** Synthetic primary-failure test triggers secondary and produces a response; `degraded` carries `chat_fallback:<provider>` marker.
+- **Scope (shipped):**
+  1. `FallbackChatProvider((name, primary), *secondaries)` wrapper implementing `ChatProvider`; advances on retryable errors only (rate limit, 5xx/408/429, openai/httpx timeout + connection classes, builtin `TimeoutError` / `ConnectionError`); non-retryable errors re-raise immediately.
+  2. `is_retryable_chat_error(exc)` classifier matches by exception class name + `status_code` attribute, so the wrapper has no hard dependency on `openai` or `httpx` at import time.
+  3. `CHAT_PROVIDERS` env (comma-separated, ordered) overrides single-`CHAT_PROVIDER` mode; registry composes the chain transparently and validates each name against `CHAT_PROVIDERS` allowlist.
+  4. Surviving provider's `last_usage` is forwarded so the per-turn token-accounting path is unchanged.
+  5. `agent/nodes.py` adds `_record_chat_fallback(chat, out)` and calls it after each chat invocation in `reflect_on_evidence`, `plan_action`, and `save_memory`; emits `chat_fallback:<provider>` into the `degraded` channel for the turn.
+- **Files:** `core/providers/chat/fallback.py` (new), `core/providers/registry.py`, `core/settings.py`, `agent/nodes.py`, `.env.example`, `tests/test_providers.py`.
+- **Acceptance:** ✅ 12 new tests; 148/148 pass. Synthetic-primary-failure test through `reflect_on_evidence` produces a reply *and* a `chat_fallback:openai` marker; non-retryable errors short-circuit; exhausted chain raises a `RuntimeError` summarizing every failure.
+
+## P1 — Next
 
 ### 4. Feed error context back into the agent on structured-output retry
 - **Why:** `plan_action` swallows `ValueError` on bad JSON; PRINCE feeds the error + invalid output back to the model for self-correction (capped at 3 attempts).

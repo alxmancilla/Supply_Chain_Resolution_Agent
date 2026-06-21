@@ -69,6 +69,13 @@ remembers user preferences across sessions.
 - **Pluggable model providers.** Embedding and chat backends sit behind
   protocols in `core/providers/`. Defaults are Voyage `voyage-4` and
   Grove `gpt-5.5`; switching vendors means writing one class.
+- **Cross-provider chat fallback.** When `CHAT_PROVIDERS` lists more
+  than one backend (e.g. `grove,openai`), the registry composes a
+  `FallbackChatProvider` that advances to the next entry on retryable
+  failures (rate limit, 5xx/408/429, openai/httpx timeouts, connection
+  errors). Non-retryable errors short-circuit. Each fallback emits a
+  `chat_fallback:<provider>` marker into the `degraded` channel for
+  the turn so the UI can surface that a backup model answered.
 - **Eval harness with a baseline gate.** `python -m evals.runner` scores
   four suites (intent accuracy, RAG recall, KG row-match, and action
   planning) and exits non-zero if any score drops vs. the committed
@@ -144,9 +151,11 @@ for tests, so backends and providers are swappable.
 │   ├── usage.py                 #   Token-usage extraction + per-1k cost reducer
 │   ├── router.py                #   Heuristic + LLM intent routers
 │   ├── providers/               #   Model backends
-│   │   ├── registry.py          #     Provider dispatch by env
+│   │   ├── registry.py          #     Provider dispatch by env (single or fallback chain)
 │   │   ├── embeddings/voyage.py #     Voyage voyage-4 (1024-dim)
-│   │   └── chat/grove.py        #     Grove GPT-5.5
+│   │   └── chat/
+│   │       ├── grove.py         #     Grove GPT-5.5
+│   │       └── fallback.py      #     FallbackChatProvider + retryable-error classifier
 │   ├── rag/mongo.py             #   $vectorSearch over knowledge_corpus
 │   ├── kg/                      #   $graphLookup + entity extractor
 │   └── memory/
@@ -166,7 +175,7 @@ for tests, so backends and providers are swappable.
 │   ├── baseline.json            #   Committed live scores (4-metric suite)
 │   ├── latency_baseline.json    #   Committed latency-mode p50/p95 sample
 │   └── datasets/*.jsonl         #   20 + 13 + 6 + 6 + 5 labeled cases
-├── tests/                       # 102 unit tests (in-memory fakes, no Atlas)
+├── tests/                       # 148 unit tests (in-memory fakes, no Atlas)
 ├── tools/
 │   ├── demo.py                  #   One-turn end-to-end demo
 │   ├── smoke_turn.py            #   End-to-end 3-turn smoke
@@ -316,9 +325,14 @@ produced.
 python -m pytest tests/ -v
 ```
 
-102 tests covering the retrievers, the router, the KG layer, the
-provider protocols (including settings-driven model-name overrides),
-memory dedup + tombstones, the reflector (both the standalone
+148 tests covering the retrievers, the router, the KG layer, the
+provider protocols (including settings-driven model-name overrides
+and the cross-provider `FallbackChatProvider` chain — classifier,
+retryable→fallback, non-retryable short-circuit, exhausted-chain
+error, registry composition, and the `chat_fallback:<provider>`
+marker emitted by `reflect_on_evidence`), the hybrid RAG path
+(vector + BM25 RRF + reranker), the think-and-plan / reflection
+loop, memory dedup + tombstones, the reflector (both the standalone
 clustering pass and the in-graph `REFLECT_EVERY_N_TURNS` trigger),
 the streamed `generate_response` path (TTFT included), the citation
 validator, the token/cost accounting helpers + per-node usage
@@ -335,6 +349,7 @@ in-memory fakes — no Atlas, Voyage, or Grove credentials needed.
 | `VOYAGE_API_KEY`            | Voyage AI key (only if using the Voyage embedding provider) | *(required if `EMBEDDING_PROVIDER=voyage`)* |
 | `EMBEDDING_PROVIDER`        | Which embedding backend to use                             | `voyage`                 |
 | `CHAT_PROVIDER`             | Which chat backend to use                                  | `grove`                  |
+| `CHAT_PROVIDERS`            | Optional ordered, comma-separated fallback chain (e.g. `grove,openai`). When set with >1 entry, `get_chat_provider()` returns a `FallbackChatProvider` that advances on retryable errors; emits `chat_fallback:<name>` into `degraded`. Unset → use `CHAT_PROVIDER` alone | *(unset)* |
 | `EMBEDDING_MODEL`           | Model name passed to the embedding provider                | `voyage-4`               |
 | `CHAT_MODEL`                | Model name passed to the chat provider                     | `gpt-5.5`                |
 | `REALM_ID`                  | Tenant scope (all collections)                             | `customer-tenant-001`    |
@@ -375,6 +390,26 @@ python -m tools.cleanup_memories --type procedural --realm <realm_id> --yes
   `langchain-openai`) live only inside `core/providers/`. Everything
   else talks to the provider protocols, so swapping vendors does not
   touch `agent/`, `core/memory/`, `core/rag/`, or `core/kg/`.
+- **Cross-provider chat fallback.** Off by default — when
+  `CHAT_PROVIDERS` is unset the registry returns the single configured
+  chat provider (no wrapper allocated). When set with >1 entry,
+  `get_chat_provider()` returns a `FallbackChatProvider` that sequences
+  the chain on every `invoke` / `invoke_typed`; retryable failures
+  (`is_retryable_chat_error`: rate limit, 5xx/408/429, openai/httpx
+  timeout + connection classes, builtin `TimeoutError` /
+  `ConnectionError`) advance to the next provider, non-retryable
+  errors re-raise immediately, and an exhausted chain raises a
+  `RuntimeError` summarizing every failure. The classifier matches by
+  exception class name + `status_code` attribute, so the wrapper has
+  no hard import-time dependency on `openai` or `httpx`. Whichever
+  provider answers has its `last_usage` forwarded, so per-turn token
+  accounting is unchanged. `agent/nodes.py` calls
+  `_record_chat_fallback` after each chat invocation in
+  `reflect_on_evidence`, `plan_action`, and `save_memory` and appends
+  a single de-duped `chat_fallback:<provider>` marker into the
+  `degraded` channel for the turn. The streaming path
+  (`generate_response`) uses `chat.underlying()` and bypasses the
+  wrapper — mid-stream failover is not supported.
 - **Memory write path.** Each turn, `save_memory` runs **one**
   structured-output call against the chat provider to extract facts +
   one episode summary, then writes them through the dedup-aware `put`:

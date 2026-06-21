@@ -159,6 +159,191 @@ def test_registry_passes_settings_model_names_to_providers(monkeypatch):
         registry.reset_provider_cache()
 
 
+# ----------------------- Cross-provider chat fallback -----------------------
+
+
+class _Synthetic5xx(Exception):
+    """HTTP-5xx-style error: detected by `status_code` attribute."""
+
+    def __init__(self, status_code: int = 503) -> None:
+        super().__init__(f"http {status_code}")
+        self.status_code = status_code
+
+
+class RateLimitError(Exception):
+    """Class-name match for the openai-python error of the same name."""
+
+
+class APITimeoutError(Exception):
+    """Class-name match for the openai-python error of the same name."""
+
+
+def test_is_retryable_recognizes_rate_limit_and_timeout_by_name():
+    from core.providers.chat.fallback import is_retryable_chat_error
+
+    assert is_retryable_chat_error(RateLimitError("rl"))
+    assert is_retryable_chat_error(APITimeoutError("to"))
+
+
+def test_is_retryable_recognizes_5xx_and_429_by_status_code():
+    from core.providers.chat.fallback import is_retryable_chat_error
+
+    assert is_retryable_chat_error(_Synthetic5xx(500))
+    assert is_retryable_chat_error(_Synthetic5xx(429))
+    assert is_retryable_chat_error(_Synthetic5xx(408))
+    assert not is_retryable_chat_error(_Synthetic5xx(400))
+    assert not is_retryable_chat_error(_Synthetic5xx(404))
+
+
+def test_is_retryable_passes_through_builtin_timeout_and_connection():
+    from core.providers.chat.fallback import is_retryable_chat_error
+
+    assert is_retryable_chat_error(TimeoutError("t"))
+    assert is_retryable_chat_error(ConnectionError("c"))
+    assert not is_retryable_chat_error(ValueError("nope"))
+
+
+def test_fallback_provider_uses_primary_when_healthy():
+    from core.providers.chat.fallback import FallbackChatProvider
+
+    primary = FakeChatProvider(reply="P", usage={"input_tokens": 3, "output_tokens": 2})
+    secondary = FakeChatProvider(reply="S")
+    chain = FallbackChatProvider(("grove", primary), ("openai", secondary))
+    assert chain.invoke("ping") == "P"
+    assert chain.last_fallback is None
+    assert chain.last_usage == {"input_tokens": 3, "output_tokens": 2}
+    assert secondary.calls == []
+
+
+def test_fallback_provider_advances_on_retryable_and_records_name():
+    from core.providers.chat.fallback import FallbackChatProvider
+
+    primary = FakeChatProvider(raise_exc=RateLimitError("rate limited"))
+    secondary = FakeChatProvider(reply="S", usage={"input_tokens": 1, "output_tokens": 4})
+    chain = FallbackChatProvider(("grove", primary), ("openai", secondary))
+    assert chain.invoke("ping") == "S"
+    assert chain.last_fallback == "openai"
+    assert chain.last_usage == {"input_tokens": 1, "output_tokens": 4}
+
+
+def test_fallback_provider_reraises_non_retryable_immediately():
+    from core.providers.chat.fallback import FallbackChatProvider
+
+    primary = FakeChatProvider(raise_exc=ValueError("bad input"))
+    secondary = FakeChatProvider(reply="S")
+    chain = FallbackChatProvider(("grove", primary), ("openai", secondary))
+    with pytest.raises(ValueError, match="bad input"):
+        chain.invoke("ping")
+    assert secondary.calls == []
+    assert chain.last_fallback is None
+
+
+def test_fallback_provider_raises_runtime_error_when_all_exhausted():
+    from core.providers.chat.fallback import FallbackChatProvider
+
+    primary = FakeChatProvider(raise_exc=_Synthetic5xx(503))
+    secondary = FakeChatProvider(raise_exc=RateLimitError("rl"))
+    chain = FallbackChatProvider(("grove", primary), ("openai", secondary))
+    with pytest.raises(RuntimeError, match="all chat providers failed"):
+        chain.invoke("ping")
+
+
+def test_fallback_provider_forwards_invoke_typed():
+    from pydantic import BaseModel
+
+    from core.providers.chat.fallback import FallbackChatProvider
+
+    class Out(BaseModel):
+        v: int
+
+    primary = FakeChatProvider(raise_exc=APITimeoutError("t"))
+    secondary = FakeChatProvider(reply='{"v": 7}')
+    chain = FallbackChatProvider(("grove", primary), ("openai", secondary))
+    parsed = chain.invoke_typed("p", Out)
+    assert isinstance(parsed, Out) and parsed.v == 7
+    assert chain.last_fallback == "openai"
+
+
+def test_registry_returns_single_provider_for_single_name(monkeypatch):
+    from core.providers import registry
+    from core.settings import get_settings
+
+    monkeypatch.setenv("MONGODB_URI", "mongodb://localhost:27017/test")
+    monkeypatch.delenv("CHAT_PROVIDERS", raising=False)
+    get_settings.cache_clear()
+    registry.reset_provider_cache()
+    try:
+        chat = registry.get_chat_provider()
+        from core.providers.chat.grove import GroveChatProvider
+        assert isinstance(chat, GroveChatProvider)
+    finally:
+        get_settings.cache_clear()
+        registry.reset_provider_cache()
+
+
+def test_registry_composes_fallback_when_chat_providers_set(monkeypatch):
+    from core.providers import registry
+    from core.providers.chat.fallback import FallbackChatProvider
+    from core.settings import get_settings
+
+    monkeypatch.setenv("MONGODB_URI", "mongodb://localhost:27017/test")
+    monkeypatch.setenv("CHAT_PROVIDERS", "grove,grove")
+    get_settings.cache_clear()
+    registry.reset_provider_cache()
+    try:
+        chat = registry.get_chat_provider()
+        assert isinstance(chat, FallbackChatProvider)
+        assert tuple(chat.provider_chain) == ("grove", "grove")
+    finally:
+        get_settings.cache_clear()
+        registry.reset_provider_cache()
+
+
+def test_settings_rejects_unknown_chat_providers_entry(monkeypatch):
+    from core.settings import get_settings
+
+    monkeypatch.setenv("MONGODB_URI", "mongodb://localhost:27017/test")
+    monkeypatch.setenv("CHAT_PROVIDERS", "grove,does-not-exist")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="unknown providers"):
+            get_settings()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_reflect_on_evidence_emits_chat_fallback_marker(monkeypatch):
+    """Acceptance test: a fallback during reflect surfaces in `degraded`."""
+    import json
+    from langchain_core.messages import HumanMessage
+
+    from agent import nodes
+    from core.providers.chat.fallback import FallbackChatProvider
+    from core.settings import AgentContext
+
+    payload = json.dumps({
+        "sufficient": False,
+        "missing": ["carrier SLA"],
+        "followup_subquery": "carrier SLA for TX-AZ",
+        "rationale": "no rag hits",
+    })
+    primary = FakeChatProvider(raise_exc=RateLimitError("rate limited"))
+    secondary = FakeChatProvider(reply=payload)
+    chain = FallbackChatProvider(("grove", primary), ("openai", secondary))
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chain)
+    state = {
+        "messages": [HumanMessage(content="recommend a carrier")],
+        "context": AgentContext(realm_id="r", user_id="u", agent_id="a"),
+        "routing": {"intent_label": "recommend_shipment", "branches": ["rag", "kg"]},
+        "plan": {"replan_count": 0},
+        "rag_hits": [],
+        "kg_hits": [],
+    }
+    out = nodes.reflect_on_evidence(state)
+    assert out["reflection_eval"]["sufficient"] is False
+    assert "chat_fallback:openai" in out["degraded"]
+
+
 def test_timed_decorator_records_latency_and_opens_span_safely():
     from core.latency import timed
     from core.settings import AgentContext

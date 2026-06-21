@@ -193,6 +193,20 @@ def _query_for(state: AgentState) -> str:
     return _last_user_text(state["messages"])
 
 
+def _record_chat_fallback(chat: Any, out: dict[str, Any]) -> None:
+    """Append `chat_fallback:<provider>` to `out['degraded']` when the chat
+    provider just failed over to a secondary. No-op for non-fallback providers.
+    """
+    fallback = getattr(chat, "last_fallback", None)
+    if not fallback:
+        return
+    marker = f"chat_fallback:{fallback}"
+    markers = list(out.get("degraded") or [])
+    if marker not in markers:
+        markers.append(marker)
+    out["degraded"] = markers
+
+
 _ROUTER_FALLBACK = {
     "intent_label": "fallback",
     "branches": list(ALL_BRANCHES),
@@ -427,6 +441,7 @@ def reflect_on_evidence(state: AgentState) -> dict[str, Any]:
     usage = getattr(chat, "last_usage", None)
     if usage:
         out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], get_settings())
+    _record_chat_fallback(chat, out)
     return out
 
 
@@ -605,6 +620,7 @@ def plan_action(state: AgentState) -> dict[str, Any]:
     usage = getattr(chat, "last_usage", None)
     if usage:
         out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], get_settings())
+    _record_chat_fallback(chat, out)
     return out
 
 
@@ -800,6 +816,7 @@ def save_memory(state: AgentState) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if usage:
         out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], settings)
+    _record_chat_fallback(chat, out)
 
     every = settings.reflect_every_n_turns
     if every > 0:
@@ -812,7 +829,10 @@ def save_memory(state: AgentState) -> dict[str, Any]:
                     ctx.realm_id, ctx.user_id, settings.reflect_threshold
                 )
             except Exception:
-                out["degraded"] = ["reflection_failed"]
+                markers = list(out.get("degraded") or [])
+                if "reflection_failed" not in markers:
+                    markers.append("reflection_failed")
+                out["degraded"] = markers
     return out
 
 
