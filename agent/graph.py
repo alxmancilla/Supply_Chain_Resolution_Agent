@@ -13,6 +13,7 @@ a booking draft before persisting memory:
                                                 ├─> retrieve_rag ────────┼─> reflect_on_evidence
                                                 └─> retrieve_kg ─────────┘
               -> {think_and_plan (loop, capped) | generate_response}
+              -> {review_draft (opt-in) | validate_citations}
               -> validate_citations -> plan_action -> execute_action
               -> save_memory -> END
 """
@@ -23,6 +24,7 @@ from functools import lru_cache
 from langgraph.graph import END, START, StateGraph
 
 from core.schemas import ALL_BRANCHES
+from core.settings import get_settings
 
 from .memory import get_checkpointer, get_store
 from .nodes import (
@@ -37,6 +39,7 @@ from .nodes import (
     retrieve_ltm,
     retrieve_procedures,
     retrieve_rag,
+    review_draft,
     save_memory,
     think_and_plan,
     validate_citations,
@@ -67,6 +70,13 @@ def _route_after_reflection(state: AgentState) -> str:
     return "generate_response"
 
 
+def _route_after_writer(_state: AgentState) -> str:
+    """Route the Writer's draft through the reviewer when the flag is on."""
+    if get_settings().review_draft_enabled:
+        return "review_draft"
+    return "validate_citations"
+
+
 def build_graph():
     builder = StateGraph(AgentState)
     builder.add_node("classify_intent", classify_intent)
@@ -78,6 +88,7 @@ def build_graph():
     builder.add_node("retrieve_kg", retrieve_kg)
     builder.add_node("reflect_on_evidence", reflect_on_evidence)
     builder.add_node("generate_response", generate_response)
+    builder.add_node("review_draft", review_draft)
     builder.add_node("validate_citations", validate_citations)
     builder.add_node("plan_action", plan_action)
     builder.add_node("execute_action", execute_action)
@@ -97,7 +108,12 @@ def build_graph():
         _route_after_reflection,
         ["think_and_plan", "generate_response"],
     )
-    builder.add_edge("generate_response", "validate_citations")
+    builder.add_conditional_edges(
+        "generate_response",
+        _route_after_writer,
+        ["review_draft", "validate_citations"],
+    )
+    builder.add_edge("review_draft", "validate_citations")
     builder.add_edge("validate_citations", "plan_action")
     builder.add_edge("plan_action", "execute_action")
     builder.add_edge("execute_action", "save_memory")

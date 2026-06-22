@@ -84,6 +84,17 @@ remembers user preferences across sessions.
   default 3). Successful retries emit `structured_retry:<node>`;
   exhausted budgets emit `structured_failed:<node>` and the node
   degrades to a safe default rather than crashing the turn.
+- **Writer + opt-in draft reviewer.** `generate_response` plays the
+  Writer role and streams the user-facing reply. When
+  `REVIEW_DRAFT_ENABLED=1`, a second `review_draft` node re-reads the
+  streamed draft against the same retrieved context and asks the chat
+  provider for a structured `DraftReview`; on `needs_revision=True`
+  with a non-empty `revised_reply` it appends a new `AIMessage` so
+  `validate_citations` and the UI see the revised text. Bypassed
+  without an LLM call for short replies, no-evidence turns, or when
+  no draft exists. Emits `draft_review_ok`, `draft_revised`,
+  `draft_review_skipped:<reason>`, or `structured_failed:review_draft`
+  for observability.
 - **Live-traffic evaluation (daily batch).** `python -m
   tools.eval_live_traffic` walks the last 24h of MongoDB checkpoints
   (one terminal checkpoint per `thread_id`), reconstructs each turn's
@@ -194,7 +205,7 @@ for tests, so backends and providers are swappable.
 │   ├── baseline.json            #   Committed live scores (4-metric suite)
 │   ├── latency_baseline.json    #   Committed latency-mode p50/p95 sample
 │   └── datasets/*.jsonl         #   20 + 13 + 6 + 6 + 5 labeled cases
-├── tests/                       # 176 unit tests (in-memory fakes, no Atlas)
+├── tests/                       # 186 unit tests (in-memory fakes, no Atlas)
 ├── tools/
 │   ├── demo.py                  #   One-turn end-to-end demo
 │   ├── smoke_turn.py            #   End-to-end 3-turn smoke
@@ -362,7 +373,7 @@ also prints it to stdout. A `run_at_-1` index (created by
 python -m pytest tests/ -v
 ```
 
-176 tests covering the retrievers, the router, the KG layer, the
+186 tests covering the retrievers, the router, the KG layer, the
 provider protocols (including settings-driven model-name overrides,
 the cross-provider `FallbackChatProvider` chain — classifier,
 retryable→fallback, non-retryable short-circuit, exhausted-chain
@@ -383,7 +394,12 @@ percentile math and `--against` baseline diffing), and the
 live-traffic eval pipeline (`JudgeScore` clipping, judge prompt
 shapes, parse-failure fallback to a 0-score sentinel, checkpoint
 extraction over a synthetic `MongoDBSaver`, window/limit/dedup
-behaviour, and the mean/n aggregator). Runs against in-memory
+behaviour, and the mean/n aggregator), and the opt-in draft-review
+loop (flag-off no-op, short-reply / no-evidence / no-draft bypass
+markers, reviewer-approves vs. reviewer-revises paths including the
+appended `AIMessage`, blank-revision guard, `structured_failed`
+fallback on unparseable output, and `_route_after_writer` branching
+on the `REVIEW_DRAFT_ENABLED` flag). Runs against in-memory
 fakes — no Atlas, Voyage, or Grove credentials needed.
 
 ## Configuration
@@ -408,6 +424,8 @@ fakes — no Atlas, Voyage, or Grove credentials needed.
 | `REFLECT_EVERY_N_TURNS`     | When > 0, `save_memory` runs `LLMMemoryReflector` against semantic + episodic LTM every N successful turns per (realm, user); 0 keeps reflection a manual `tools/reflect.py` job | `0` |
 | `REFLECT_THRESHOLD`         | Cosine threshold passed to the in-graph reflector when scheduling is on | `0.88`                   |
 | `STRUCTURED_RETRY_MAX_ATTEMPTS` | Max attempts for `invoke_typed_with_retry` (re-prompt with the prior parse error on `pydantic.ValidationError` / `json.JSONDecodeError`); 1 disables retries | `3` |
+| `REVIEW_DRAFT_ENABLED`      | When `1`, insert `review_draft` between `generate_response` and `validate_citations`; on a flagged revision the reviewer appends a new `AIMessage` carrying the revised reply. Off → topology stays flat | `0` |
+| `REVIEW_DRAFT_MIN_CHARS`    | Draft length below which `review_draft` bypasses the LLM call and emits `draft_review_skipped:short_reply` | `200` |
 | `OTEL_ENABLED`              | When `1`, configure an OTLP exporter on startup; otherwise the per-node spans are no-ops | `0` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Standard OTel collector endpoint (used when `OTEL_ENABLED=1`) | *(unset)*               |
 
@@ -474,6 +492,25 @@ python -m tools.cleanup_memories --type procedural --realm <realm_id> --yes
   so a malformed reply from one provider doesn't burn a retry on the
   next one, and `last_structured_attempts` is forwarded so the marker
   reports accurate attempt counts even after a failover.
+- **Draft-review loop.** Off by default. When `REVIEW_DRAFT_ENABLED=1`,
+  the graph routes the streamed Writer draft through `review_draft`
+  before `validate_citations`. The node first short-circuits without
+  an LLM call when there is no prior `AIMessage`, when the draft is
+  shorter than `REVIEW_DRAFT_MIN_CHARS`, or when no grounding
+  evidence was retrieved (recall- and policy-only turns) — each path
+  emits its own `draft_review_skipped:<reason>` marker. Otherwise it
+  calls `invoke_typed_with_retry(chat, prompt, DraftReview, ...)`
+  with the user question, the joined evidence summary, and the draft
+  itself. On `needs_revision=True` with a non-empty `revised_reply`
+  it appends a fresh `AIMessage` carrying the revision (so the
+  citation validator and the UI see the corrected text) and emits
+  `draft_revised`; otherwise it emits `draft_review_ok`. Reviewer
+  tokens count toward per-turn `usage`, parse exhaustion degrades
+  cleanly with `structured_failed:review_draft`, and any chat
+  fallback during the reviewer call still surfaces as
+  `chat_fallback:<provider>`. Node name `generate_response` is kept
+  stable because the Streamlit UI and smoke harness subscribe on its
+  custom-stream channel.
 - **Live-traffic evaluation.** `tools/eval_live_traffic.py` is the
   offline-quality counterpart to the regression-gate eval harness:
   while `evals/runner.py` scores a fixed labeled dataset, this CLI

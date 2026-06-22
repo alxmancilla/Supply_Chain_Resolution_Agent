@@ -35,6 +35,7 @@ from core.router import get_intent_router
 from core.schemas import (
     ALL_BRANCHES,
     BookingProposal,
+    DraftReview,
     EvidenceReflection,
     ProcedureProposal,
     ResearchPlan,
@@ -83,6 +84,7 @@ from core.schemas import MemoryExtraction
 from .memory import EMBEDDING_DIMS, get_booking_drafts_collection, get_embeddings  # noqa: F401  (re-exported for callers)
 from .prompts import (
     ACTION_PLANNING_PROMPT,
+    DRAFT_REVIEW_PROMPT,
     MEMORY_EXTRACTION_PROMPT,
     PROCEDURE_PROPOSAL_PROMPT,
     REFLECTION_PROMPT,
@@ -493,6 +495,17 @@ def _resolve_stream_writer():
 
 @timed("llm_ms")
 def generate_response(state: AgentState) -> dict[str, Any]:
+    """Writer-role node: synthesizes and streams the user-facing reply.
+
+    Builds a system message from the per-branch context channels, prepends
+    it to the running message history, and streams the LLM response back
+    through LangGraph's custom-channel writer. Records `llm_ttft_ms`
+    (wall-time to the first non-empty token) and per-call `usage` so the
+    latency strip and the token-accounting reducer see the same numbers.
+    The function name is kept stable because the streamed payload is keyed
+    on `{"node": "generate_response", ...}` and the Streamlit UI + smoke
+    harness listen on that channel.
+    """
     system = SystemMessage(
         content=SYSTEM_PROMPT.format(
             ltm_context=_ctx_for(state, "ltm", "ltm_context"),
@@ -542,6 +555,80 @@ def generate_response(state: AgentState) -> dict[str, Any]:
         out["latency_ms"] = {"llm_ttft_ms": ttft_ms}
     if usage is not None:
         out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], get_settings())
+    return out
+
+
+def _last_ai_text(state: AgentState) -> str:
+    for msg in reversed(state.get("messages") or []):
+        if isinstance(msg, AIMessage):
+            return msg.content if isinstance(msg.content, str) else str(msg.content)
+    return ""
+
+
+@timed("review_ms")
+def review_draft(state: AgentState) -> dict[str, Any]:
+    """Optional draft-review pass over the Writer's streamed reply.
+
+    Off by default; opt in with `REVIEW_DRAFT_ENABLED=1`. Runs one
+    structured-output call against the chat provider asking a reviewer
+    persona whether the draft (a) addresses every sub-question, (b) avoids
+    unsupported claims relative to the retrieved context, and (c) cites
+    its sources. On `needs_revision=True` with a non-empty `revised_reply`
+    the node appends a new `AIMessage` so `validate_citations` and the UI
+    surface the revised text as the visible answer.
+
+    Bypassed without an LLM call when the draft is shorter than
+    `REVIEW_DRAFT_MIN_CHARS`, when no grounding evidence was retrieved
+    (recall- or policy-only turns), or when there is no prior
+    `AIMessage`. Emits one of `draft_review_skipped:<reason>`,
+    `draft_review_ok`, `draft_revised`, or `structured_failed:review_draft`
+    into the `degraded` channel so the turn is observable downstream.
+    """
+    settings = get_settings()
+    if not settings.review_draft_enabled:
+        return {}
+    draft = _last_ai_text(state)
+    out: dict[str, Any] = {}
+    if not draft:
+        _append_marker(out, "draft_review_skipped:no_draft")
+        return out
+    if len(draft) < settings.review_draft_min_chars:
+        _append_marker(out, "draft_review_skipped:short_reply")
+        return out
+    evidence = _evidence_summary(state)
+    if evidence.startswith("("):
+        _append_marker(out, "draft_review_skipped:no_evidence")
+        return out
+    user_text = _last_user_text(state["messages"])
+    chat = get_chat_provider()
+    prompt = DRAFT_REVIEW_PROMPT.format(
+        user_message=user_text,
+        evidence_summary=evidence,
+        draft_reply=draft,
+    )
+    structured_failed = False
+    try:
+        verdict = invoke_typed_with_retry(
+            chat, prompt, DraftReview,
+            max_attempts=settings.structured_retry_max_attempts,
+        )
+    except ValueError:
+        structured_failed = True
+        verdict = DraftReview(needs_revision=False, reasons=["reviewer_parse_failed"])
+    assert isinstance(verdict, DraftReview)
+    usage = getattr(chat, "last_usage", None)
+    if usage:
+        out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], settings)
+    revised = (verdict.revised_reply or "").strip()
+    if verdict.needs_revision and revised:
+        out["messages"] = [AIMessage(content=revised)]
+        _append_marker(out, "draft_revised")
+    elif not structured_failed:
+        _append_marker(out, "draft_review_ok")
+    _record_structured_retry(chat, out, node="review_draft")
+    if structured_failed:
+        _append_marker(out, "structured_failed:review_draft")
+    _record_chat_fallback(chat, out)
     return out
 
 

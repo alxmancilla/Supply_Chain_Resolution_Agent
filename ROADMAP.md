@@ -60,12 +60,18 @@ the ones that don't apply at our scale.
 - **Files:** `evals/judges.py` (new), `tools/eval_live_traffic.py` (new), `agent/memory.py`, `db/indexes.py`, `tests/test_evals_live_traffic.py` (new).
 - **Acceptance:** ✅ 20 new tests; 176/176 pass. Extractor drops partial states, dedupes by `thread_id`, filters outside the window, and respects `--limit`. Aggregator returns per-judge mean + n (zero-safe on empty input). Judges parse fake LLM output and fall back to a 0-score sentinel after retries exhausted.
 
-## P2 — Quality of life
+### 6. Writer Agent split + draft review loop ✅
+- **Why:** `generate_response` synthesizes the user-facing reply *and* is the only chance to catch hallucinations or missing sub-question coverage before `validate_citations` flags them post hoc. A dedicated reviewer that re-reads the draft against the same retrieved context lets the agent self-correct in one bounded pass, without changing the streaming UX when the flag is off.
+- **Scope (shipped):**
+  1. `generate_response` docstring + role clarified as the Writer; node name kept stable because the Streamlit UI and smoke harness subscribe on `{"node": "generate_response", ...}` stream payloads.
+  2. New `review_draft` node behind `REVIEW_DRAFT_ENABLED` (default off). Bypasses the LLM when the draft is shorter than `REVIEW_DRAFT_MIN_CHARS` (default 200), when no grounding evidence was retrieved, or when no prior `AIMessage` exists — emits `draft_review_skipped:<reason>` for observability.
+  3. When invoked, calls `invoke_typed_with_retry(chat, prompt, DraftReview, ...)` against `DRAFT_REVIEW_PROMPT`; on `needs_revision=True` with a non-empty `revised_reply`, appends a new `AIMessage` (so `validate_citations` and the UI see the revised text) and emits `draft_revised`. On approve: `draft_review_ok`. On parse exhaustion: `structured_failed:review_draft`. Reviewer tokens count toward per-turn `usage`.
+  4. `agent/graph.py` adds the node + `_route_after_writer` conditional edge so topology stays flat (`generate_response -> validate_citations`) when the flag is off.
+  5. `DraftReview` schema (`needs_revision`, `revised_reply`, `reasons`); `REVIEW_DRAFT_ENABLED` and `REVIEW_DRAFT_MIN_CHARS` documented in `.env.example`.
+- **Files:** `core/schemas.py`, `core/settings.py`, `agent/prompts.py`, `agent/nodes.py`, `agent/graph.py`, `.env.example`, `tests/test_draft_review.py` (new).
+- **Acceptance:** ✅ 10 new tests; 186/186 pass. Flag-off path is a true no-op (no chat calls, no markers); enabled path covers short-reply bypass, no-evidence bypass, approve, revise (replaces draft via new AIMessage), blank-revision guard, and `structured_failed:review_draft` on unparseable output. Graph test confirms node wiring and conditional routing.
 
-### 6. Writer Agent split + draft review loop
-- **Why:** Today's `generate_response` handles both synthesis and formatting. A dedicated Writer with an optional 1-pass draft reviewer enables completeness checks for complex outputs.
-- **Scope:** Rename + reshape `generate_response` into a Writer-role node; add optional `review_draft` node behind a feature flag.
-- **Files:** `agent/nodes.py`, `agent/prompts.py`, `agent/graph.py`.
+## P2 — Quality of life
 
 ### 7. Per-sentence citations in the Streamlit UI
 - **Why:** Granular citations (hover to source + page) significantly raise the trust ceiling. PRINCE's UX is the bar.
@@ -90,7 +96,8 @@ the ones that don't apply at our scale.
 
 ## Sequencing rationale
 
-Items 1-5 deliver the highest user-visible quality gains (T&P + Reflection,
-hybrid RAG, cross-provider fallback, self-correcting structured output, and
-live-traffic drift detection). P2 sharpens trust and operability without
-reshaping the agent. P3 is on standby until product scope demands it.
+Items 1-6 deliver the highest user-visible quality gains (T&P + Reflection,
+hybrid RAG, cross-provider fallback, self-correcting structured output,
+live-traffic drift detection, and the opt-in draft reviewer). P2 sharpens
+trust and operability without reshaping the agent. P3 is on standby until
+product scope demands it.

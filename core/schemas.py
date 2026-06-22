@@ -205,6 +205,22 @@ class EvidenceReflection(BaseModel):
     rationale: str = ""
 
 
+class DraftReview(BaseModel):
+    """Verdict emitted by `review_draft` over the Writer's streamed draft.
+
+    `needs_revision=True` together with a non-empty `revised_reply` causes
+    the node to append the revised text as a new `AIMessage`, which then
+    becomes the visible answer for `validate_citations` and the UI.
+    `reasons` is a short bulleted list of what changed (or why no change
+    was needed) and is surfaced for observability only.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    needs_revision: bool = False
+    revised_reply: Optional[str] = None
+    reasons: list[str] = Field(default_factory=list)
+
+
 class RagQueryFilters(BaseModel):
     """Structured filters extracted from a natural-language RAG query.
 
@@ -240,5 +256,6 @@ __all__ = [
     "ProcedureProposal",
     "ResearchPlan",
     "EvidenceReflection",
+    "DraftReview",
     "RagQueryFilters",
 ]

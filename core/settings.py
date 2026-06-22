@@ -83,6 +83,8 @@ class Settings:
     rag_rerank_model: str = "rerank-2-lite"
     rag_search_index_name: str = "knowledge_corpus_search"
     structured_retry_max_attempts: int = 3
+    review_draft_enabled: bool = False
+    review_draft_min_chars: int = 200
 
 
 @lru_cache(maxsize=1)
@@ -117,6 +119,8 @@ def get_settings() -> Settings:
         rag_rerank_model=os.environ.get("RAG_RERANK_MODEL", "rerank-2-lite"),
         rag_search_index_name=os.environ.get("RAG_SEARCH_INDEX_NAME", "knowledge_corpus_search"),
         structured_retry_max_attempts=int(os.environ.get("STRUCTURED_RETRY_MAX_ATTEMPTS", "3")),
+        review_draft_enabled=_env_bool("REVIEW_DRAFT_ENABLED", False),
+        review_draft_min_chars=int(os.environ.get("REVIEW_DRAFT_MIN_CHARS", "200")),
     )
 
 
