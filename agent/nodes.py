@@ -6,6 +6,7 @@ UI can render per-turn metrics with color-coded thresholds.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -684,6 +685,35 @@ def validate_citations(state: AgentState) -> dict[str, Any]:
 _NO_ACTION: dict[str, Any] = {"action_type": "none"}
 
 
+_COST_NUMBER = r"\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?)"
+_COST_RANGE_RE = re.compile(
+    _COST_NUMBER + r"\s*(?:-|–|—|to|and)\s*\$?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?)"
+)
+_COST_SINGLE_RE = re.compile(_COST_NUMBER)
+
+
+def _extract_cost_fallback(text: str) -> float | None:
+    """Best-effort cost extractor when the action planner LLM returns no cost.
+
+    Prefer the upper bound of the first '$X-$Y' (or '$X to $Y') range so the
+    approval gate stays conservative; fall back to the first plain '$N' value
+    that is strictly positive (filters out '$0 surcharge' style mentions).
+    Returns None on no match. Used only as a safety net after the LLM's
+    structured pass — does not override a planner-supplied cost.
+    """
+    if not text:
+        return None
+    for m in _COST_RANGE_RE.finditer(text):
+        upper = float(m.group(2).replace(",", ""))
+        if upper > 0:
+            return upper
+    for m in _COST_SINGLE_RE.finditer(text):
+        value = float(m.group(1).replace(",", ""))
+        if value > 0:
+            return value
+    return None
+
+
 @timed("plan_ms")
 def plan_action(state: AgentState) -> dict[str, Any]:
     """Extract a structured action proposal from the agent reply.
@@ -738,9 +768,21 @@ def plan_action(state: AgentState) -> dict[str, Any]:
             structured_failed = True
         else:
             assert isinstance(booking, BookingProposal)
+            cost_fallback_used = False
+            if booking.action_type == "create_booking_draft" and not booking.estimated_cost_usd:
+                fallback_cost = _extract_cost_fallback(agent_text)
+                if fallback_cost is None:
+                    fallback_cost = _extract_cost_fallback(state.get("rag_context") or "")
+                if fallback_cost is not None:
+                    booking = booking.model_copy(update={"estimated_cost_usd": fallback_cost})
+                    cost_fallback_used = True
             if booking.requires_approval is False and "[REQUIRES HUMAN APPROVAL]" in agent_text:
                 booking = booking.model_copy(update={"requires_approval": True})
+            if booking.requires_approval is False and (booking.estimated_cost_usd or 0) > 10000:
+                booking = booking.model_copy(update={"requires_approval": True})
             out = {"action_plan": booking.model_dump()}
+            if cost_fallback_used:
+                _append_marker(out, "cost_extracted_via_fallback")
     usage = getattr(chat, "last_usage", None)
     if usage:
         out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], settings)
