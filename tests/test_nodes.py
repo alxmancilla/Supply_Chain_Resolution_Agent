@@ -238,6 +238,41 @@ def test_validate_citations_skips_when_reply_is_empty():
     assert "degraded" not in validate_citations(state)
 
 
+def test_validate_citations_attaches_citation_spans_from_rag():
+    reply = (
+        "Carrier A serves the Austin to Dallas same-day lane with no fuel surcharge "
+        "under 20,000 lb. Typical 15,000 lb dry-van quotes price between $410 and $475 all-in."
+    )
+    rag = [
+        {
+            "doc_type": "route_guide",
+            "source": "route_guides/austin_dallas_hot_lane.pdf",
+            "text": (
+                "Primary carrier: Carrier A dry van with no fuel surcharge under "
+                "the 20,000 lb TX-TX threshold. Typical 15,000 lb dry-van quotes "
+                "price between $410 and $475 all-in."
+            ),
+            "score": 0.71,
+        },
+    ]
+    out = validate_citations(_citation_state(reply, rag=rag))
+    spans = out.get("citations")
+    assert isinstance(spans, list) and len(spans) >= 1
+    # Both sentences share enough tokens with the chunk to bind to it.
+    assert all(s["source"] == "route_guides/austin_dallas_hot_lane.pdf" for s in spans)
+    assert all(s["kind"] == "rag" for s in spans)
+    assert all(s["overlap"] >= 2 for s in spans)
+    # Offsets are valid and ordered.
+    assert all(0 <= s["start"] < s["end"] <= len(reply) for s in spans)
+
+
+def test_validate_citations_no_citations_when_overlap_below_floor():
+    reply = "Hello there."
+    rag = [{"source": "x.pdf", "doc_type": "policy", "text": "Carrier A dry van TX-TX lane.", "score": 0.5}]
+    out = validate_citations(_citation_state(reply, rag=rag))
+    assert "citations" not in out
+
+
 def _save_memory_state(context, agent_reply: str = "ok"):
     return {
         "messages": [HumanMessage(content="how do I ship TX-AZ?"), AIMessage(content=agent_reply)],
@@ -875,3 +910,87 @@ def test_post_filter_falls_back_when_filter_eliminates_all():
     # Query mentions TX-AZ but only TX-CA chunk exists → fallback returns the candidate set.
     hits = retriever.query(realm_id="r1", text="TX-AZ shipments", k=5)
     assert [h.source for h in hits] == ["tx_ca_lane.pdf"]
+
+
+
+# ---------------------------------------------------------------------------
+# core.citations — sentence splitter + lexical-overlap matcher
+# ---------------------------------------------------------------------------
+
+
+def test_citations_split_sentences_preserves_offsets():
+    from core.citations import split_sentences
+
+    text = "First sentence. Second one is here. Third!"
+    spans = split_sentences(text)
+    assert [s for _, _, s in spans] == [
+        "First sentence.",
+        "Second one is here.",
+        "Third!",
+    ]
+    for start, end, sentence in spans:
+        assert text[start:end] == sentence
+
+
+def test_citations_match_picks_highest_overlap_chunk():
+    from core.citations import match_citations
+
+    reply = "Carrier A serves the Austin Dallas dry van lane with no fuel surcharge under 20000 lb."
+    rag = [
+        {"doc_type": "policy", "source": "noise.pdf", "text": "Detention rules and dock holds.", "score": 0.9},
+        {
+            "doc_type": "route_guide",
+            "source": "austin_dallas.pdf",
+            "text": "Carrier A dry van Austin Dallas; no fuel surcharge under 20000 lb threshold.",
+            "score": 0.6,
+        },
+    ]
+    spans = match_citations(reply, rag, None)
+    assert len(spans) == 1
+    assert spans[0]["source"] == "austin_dallas.pdf"
+    assert spans[0]["kind"] == "rag"
+    assert spans[0]["overlap"] >= 3
+
+
+def test_citations_match_breaks_ties_by_score():
+    from core.citations import match_citations
+
+    reply = "Carrier A handles TX-TX same day with dry van."
+    rag = [
+        {"doc_type": "scorecard", "source": "low.pdf",
+         "text": "Carrier A TX-TX dry van same day.", "score": 0.40},
+        {"doc_type": "scorecard", "source": "high.pdf",
+         "text": "Carrier A TX-TX dry van same day.", "score": 0.95},
+    ]
+    spans = match_citations(reply, rag, None)
+    assert len(spans) == 1
+    assert spans[0]["source"] == "high.pdf"
+
+
+def test_citations_match_returns_empty_when_no_chunks():
+    from core.citations import match_citations
+    assert match_citations("Anything goes.", [], []) == []
+    assert match_citations("Anything goes.", None, None) == []
+
+
+def test_citations_match_skips_sentences_below_overlap_floor():
+    from core.citations import match_citations
+
+    reply = "Hello. Carrier A dry van TX-TX same day Austin Dallas."
+    rag = [{"doc_type": "scorecard", "source": "s.pdf",
+            "text": "Carrier A dry van TX-TX same day Austin Dallas.", "score": 0.7}]
+    spans = match_citations(reply, rag, None)
+    # 'Hello.' has no overlap; only the second sentence is cited.
+    assert [s["sentence_idx"] for s in spans] == [1]
+
+
+def test_citations_match_uses_kg_facts():
+    from core.citations import match_citations
+
+    reply = "Carrier A serves lane TX-AZ Austin Phoenix priority one."
+    kg = [{"fact": "Carrier A serves lane TX-AZ Austin Phoenix priority=1",
+           "source_doc": "kg/tx_az.json"}]
+    spans = match_citations(reply, None, kg)
+    assert len(spans) == 1
+    assert spans[0]["kind"] == "kg"
+    assert spans[0]["source"] == "kg/tx_az.json"

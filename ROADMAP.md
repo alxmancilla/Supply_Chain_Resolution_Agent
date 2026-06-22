@@ -73,10 +73,14 @@ the ones that don't apply at our scale.
 
 ## P2 — Quality of life
 
-### 7. Per-sentence citations in the Streamlit UI
+### 7. Per-sentence citations in the Streamlit UI ✅
 - **Why:** Granular citations (hover to source + page) significantly raise the trust ceiling. PRINCE's UX is the bar.
-- **Scope:** Inline superscript markers in the streamed reply; side panel rendering the matched chunk + source link.
-- **Files:** `app.py`, `core/citations.py` (new), `agent/nodes.py` (annotate citation positions).
+- **Scope (shipped):**
+  1. New `core/citations.py` with a pure-Python sentence splitter (offset-preserving) and `match_citations(reply, rag_hits, kg_hits, *, min_overlap=2)` that picks the single best-supporting chunk per sentence by distinct-token overlap (ties broken by retrieval `score`). Domain-stopword filter keeps the signal sharp; KG facts contribute alongside RAG chunks.
+  2. `validate_citations` now also returns a `citations: list[CitationSpan]` payload on `AgentState` — same node, no extra LLM call, no new edges. The existing `citations_missing` `degraded` marker is preserved unchanged.
+  3. Streamlit reply renderer (`_render_cited_reply`) inserts inline HTML `<sup>` markers numbered by **unique source** (multiple sentences citing the same chunk share one number) with a native-browser `title=` tooltip showing the source + truncated evidence. A "Sources (N cited)" expander below the reply lists each cited chunk with `kind`, `doc_type`, `source`, score, and evidence excerpt.
+- **Files:** `core/citations.py` (new), `agent/nodes.py`, `app.py`, `tests/test_nodes.py`.
+- **Acceptance:** ✅ 8 new tests (sentence-splitter offsets, highest-overlap pick, score tie-break, empty inputs, overlap-floor skip, KG fact matching, plus 2 `validate_citations` integration tests); 201/201 pass. End-to-end smoke on a recommend-shipment turn attached 4 citations bound to the right RAG chunks + 1 KG fact with `degraded=[]`.
 
 ### 8. Resume-from-failed-node UX
 - **Why:** Already have checkpoint-based resume for interrupts; extend it to failure recovery.
@@ -98,6 +102,7 @@ the ones that don't apply at our scale.
 
 Items 1-6 deliver the highest user-visible quality gains (T&P + Reflection,
 hybrid RAG, cross-provider fallback, self-correcting structured output,
-live-traffic drift detection, and the opt-in draft reviewer). P2 sharpens
-trust and operability without reshaping the agent. P3 is on standby until
-product scope demands it.
+live-traffic drift detection, and the opt-in draft reviewer). P2.7 layered
+per-sentence citations on top without adding LLM calls or graph edges.
+The remaining P2 items (#8, #9) sharpen operability without reshaping the
+agent. P3 is on standby until product scope demands it.

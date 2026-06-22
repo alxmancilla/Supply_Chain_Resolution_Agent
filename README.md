@@ -388,7 +388,9 @@ BM25 RRF + reranker), the think-and-plan / reflection loop, memory
 dedup + tombstones, the reflector (both the standalone clustering
 pass and the in-graph `REFLECT_EVERY_N_TURNS` trigger), the
 streamed `generate_response` path (TTFT included), the citation
-validator, the token/cost accounting helpers + per-node usage
+validator + per-sentence citation binder (sentence-splitter offsets,
+highest-overlap chunk pick, score tie-break, overlap-floor skip, KG
+fact matching), the token/cost accounting helpers + per-node usage
 plumbing, the eval harness in fast mode (including latency
 percentile math and `--against` baseline diffing), and the
 live-traffic eval pipeline (`JudgeScore` clipping, judge prompt

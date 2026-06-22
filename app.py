@@ -234,6 +234,7 @@ def _finalize_turn(user_input: str, result: dict, interrupts: list[dict]) -> Non
             "usage": result.get("usage", {}),
             "degraded": result.get("degraded", []),
             "routing": result.get("routing", {}),
+            "citations": result.get("citations", []),
             "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
         }
     )
@@ -428,6 +429,135 @@ def _routing_caption(turn: dict, branch: str) -> str | None:
     return None
 
 
+_CITATION_CSS = """
+<style>
+.cit-mark {
+  color: #1f6feb;
+  font-weight: 600;
+  cursor: help;
+  padding: 0 3px;
+  margin-left: 1px;
+  border-bottom: 1px dotted #1f6feb;
+  position: relative;
+  display: inline-block;
+  font-size: 0.85em;
+  vertical-align: super;
+  line-height: 0;
+}
+.cit-mark:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 0;
+  top: 1.6em;
+  z-index: 9999;
+  background: #1f2328;
+  color: #f6f8fa;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  white-space: normal;
+  width: 380px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+  pointer-events: none;
+  line-height: 1.4;
+}
+</style>
+"""
+
+
+def _attr_escape(text: str) -> str:
+    """HTML-entity-escape an attribute value.
+
+    `[` and `]` are encoded too — otherwise Streamlit's markdown-it
+    parser interprets bracketed evidence excerpts (e.g. KG facts'
+    `[sources: …]` blocks) as markdown link syntax mid-attribute and
+    leaks the rest of the tag into the rendered text.
+    """
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("[", "&#91;")
+            .replace("]", "&#93;")
+            .replace("\n", " ")
+            .replace("\r", " ")
+    )
+
+
+def _tooltip_text(source: str, evidence: str, score: float | None) -> str:
+    """Build the (already entity-escaped) tooltip content for a marker."""
+    snippet = (evidence or "").strip()
+    if len(snippet) > 300:
+        snippet = snippet[:300] + "…"
+    score_txt = f"  (score {score:.3f})" if isinstance(score, (int, float)) else ""
+    raw = f"{source}{score_txt} — {snippet}" if snippet else f"{source}{score_txt}"
+    return _attr_escape(raw)
+
+
+def _render_cited_reply(reply: str, citations: list[dict]) -> None:
+    """Render the agent reply with inline `[N]` markers + source legend.
+
+    Citations are produced by `core.citations.match_citations` and carry
+    per-sentence (start, end, source, evidence) offsets. Markers are
+    numbered by *unique source* so multiple sentences citing the same
+    chunk share one marker. Each marker is a `<span class="cit-mark">`
+    with a `data-tip=` attribute — the CSS in `_CITATION_CSS` renders
+    a styled tooltip on hover (more reliable than native `title=`
+    tooltips which Streamlit's markdown pipeline can strip). Markers
+    are inserted at sentence ends in reverse order so earlier offsets
+    stay valid. Falls back to plain markdown when no citations are
+    attached.
+    """
+    if not reply:
+        st.markdown("_(empty response)_")
+        return
+    if not citations:
+        st.markdown(reply)
+        return
+
+    # Assign one rank per unique source (first-seen order in the reply).
+    ordered = sorted(citations, key=lambda c: c.get("end", 0))
+    rank_by_source: dict[str, int] = {}
+    legend: list[dict] = []
+    for span in ordered:
+        src = span.get("source", "?")
+        if src not in rank_by_source:
+            rank_by_source[src] = len(rank_by_source) + 1
+            legend.append(span)
+
+    annotated = reply
+    for span in reversed(ordered):
+        end = int(span.get("end", 0))
+        if not (0 < end <= len(annotated)):
+            continue
+        rank = rank_by_source[span.get("source", "?")]
+        tip = _tooltip_text(span.get("source", "?"), span.get("evidence", ""), span.get("score"))
+        marker = f'<span class="cit-mark" data-tip="{tip}">[{rank}]</span>'
+        annotated = annotated[:end] + marker + annotated[end:]
+    # st.html() bypasses st.markdown()'s sanitizer (which strips <style>);
+    # the actual reply still goes through st.markdown so the LLM's markdown
+    # formatting (bullets, bold, etc.) renders.
+    st.html(_CITATION_CSS)
+    st.markdown(annotated, unsafe_allow_html=True)
+
+    with st.expander(f"Sources ({len(legend)} cited)", expanded=True):
+        for span in legend:
+            source = span.get("source", "?")
+            rank = rank_by_source[source]
+            doc_type = span.get("doc_type", "")
+            score = span.get("score")
+            kind = span.get("kind", "rag")
+            score_txt = f" · score {score:.3f}" if isinstance(score, (int, float)) else ""
+            st.markdown(
+                f"**[{rank}]** `{kind}` · **{doc_type or '—'}** :: `{source}`{score_txt}"
+            )
+            evidence = (span.get("evidence") or "").strip()
+            if evidence:
+                st.caption(evidence[:600] + ("…" if len(evidence) > 600 else ""))
+
+
 def _render_turn(turn: dict, index: int) -> None:
     with st.chat_message("user"):
         st.markdown(turn["user"])
@@ -505,7 +635,7 @@ def _render_turn(turn: dict, index: int) -> None:
             else:
                 st.caption("No graph facts retrieved for this turn.")
         with st.expander("Response", expanded=True):
-            st.markdown(turn["ai"] or "_(empty response)_")
+            _render_cited_reply(turn.get("ai", ""), turn.get("citations") or [])
         _render_latency(turn["latency_ms"])
         _render_usage(turn.get("usage", {}))
 

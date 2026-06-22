@@ -21,6 +21,7 @@ try:
 except ImportError:  # pragma: no cover - older langgraph
     _get_stream_writer = None
 
+from core.citations import match_citations
 from core.latency import timed
 from core.kg import get_entity_extractor, get_knowledge_graph
 from core.memory import (
@@ -163,6 +164,7 @@ class AgentState(TypedDict, total=False):
     degraded: Annotated[list[str], _merge_degraded]
     usage: Annotated[dict[str, float], merge_usage]
     reflection: dict[str, int]
+    citations: list[dict[str, Any]]
 
 
 @lru_cache(maxsize=1)
@@ -673,13 +675,21 @@ def validate_citations(state: AgentState) -> dict[str, Any]:
             break
     if not reply_text:
         return {}
+    out: dict[str, Any] = {}
+    spans = match_citations(
+        reply_text,
+        state.get("rag_hits"),
+        state.get("kg_hits"),
+    )
+    if spans:
+        out["citations"] = [dict(s) for s in spans]
     citable = _citable_tokens_from(state)
     if not citable:
-        return {}
+        return out
     haystack = reply_text.lower()
-    if any(tok.lower() in haystack for tok in citable):
-        return {}
-    return {"degraded": ["citations_missing"]}
+    if not any(tok.lower() in haystack for tok in citable):
+        out["degraded"] = ["citations_missing"]
+    return out
 
 
 _NO_ACTION: dict[str, Any] = {"action_type": "none"}

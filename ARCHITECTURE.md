@@ -38,7 +38,7 @@ flowchart TB
 | **Entry points** | `app.py`, `tools/*.py`, `evals/runner.py` | UI, one-turn demo, smoke test, eval runner, consolidation CLI. |
 | **Orchestration** | `agent/graph.py`, `agent/nodes.py`, `agent/prompts.py`, `agent/memory.py` | LangGraph topology (router → parallel retrievers → streamed response → validate_citations → plan_action → execute_action → save), per-turn state, the shared `MongoClient`, and the `booking_drafts` collection. Nodes are thin — capability logic lives one layer down. |
 | **Domain** | `core/protocols.py`, `core/schemas.py`, `core/settings.py` | Interfaces every capability and provider implements, the typed objects passed between nodes (incl. `BookingProposal`), and the env-loaded settings + per-turn `AgentContext` (with `correlation_id`). |
-| **Capabilities** | `core/router.py`, `core/memory/`, `core/rag/`, `core/kg/`, `core/memory/reflector.py`, `core/latency.py`, `core/resilience.py`, `core/observability.py` | Concrete implementations of the domain protocols: intent router, three LTM classes, RAG, KG, reflection pass, plus per-node timing, OTel spans, and per-branch failure isolation. |
+| **Capabilities** | `core/router.py`, `core/memory/`, `core/rag/`, `core/kg/`, `core/memory/reflector.py`, `core/citations.py`, `core/latency.py`, `core/resilience.py`, `core/observability.py` | Concrete implementations of the domain protocols: intent router, three LTM classes, RAG, KG, reflection pass, per-sentence citation matcher, plus per-node timing, OTel spans, and per-branch failure isolation. |
 | **Providers** | `core/providers/` | Pluggable embedding and chat backends behind `EmbeddingProvider` / `ChatProvider`. Vendor SDK imports live only here. |
 | **Storage** | `db/indexes.py`, `data/seed_*.py`, Atlas (`by_genai`) | One cluster: short-term memory, three LTMs, RAG corpus, KG, booking drafts, registry. Vector indexes for the searchable collections, b-tree indexes for the KG joins. A startup preflight (`_assert_vector_index_dims`) checks each vector index matches the active embedding provider. |
 | **External APIs** | Voyage AI, Grove gateway | Reached only through the provider classes. |
@@ -63,7 +63,7 @@ flowchart TB
         GRAPH["graph.py — StateGraph (with interrupt-aware checkpointer)"]
         NODES["nodes.py — classify_intent · 5 retrievers · generate_response (streamed) · validate_citations · plan_action · execute_action · save_memory"]
         PROMPTS["prompts.py — system + extraction + action-planning + consolidation"]
-        STATE["AgentState — messages, routing, *_hits, action_plan, booking_draft, latency_ms (incl. llm_ttft_ms), usage (tokens_in/out · cost_usd), degraded"]
+        STATE["AgentState — messages, routing, *_hits, action_plan, booking_draft, citations, latency_ms (incl. llm_ttft_ms), usage (tokens_in/out · cost_usd), degraded"]
     end
 
     subgraph DOM["Domain — core/"]
@@ -166,11 +166,17 @@ flowchart TB
    to LangGraph's custom-channel `get_stream_writer` as they arrive; the
    first non-empty delta records `llm_ttft_ms`. The Streamlit UI
    renders the partial reply live.
-4. **Validate citations.** `validate_citations` scans the reply for
-   any retrieved RAG `source` (or KG `source_doc`). If groundable
-   sources were retrieved but none appear in the reply, it appends
-   `"citations_missing"` to `state['degraded']` — surfaced as a yellow
-   banner in the UI without blocking the rest of the graph.
+4. **Validate citations.** `validate_citations` does two things in one
+   pass, no extra LLM call: (a) scans the reply for any retrieved RAG
+   `source` (or KG `source_doc`) and appends `"citations_missing"` to
+   `state['degraded']` when nothing matches — surfaced as a yellow
+   banner in the UI without blocking the rest of the graph; (b) runs
+   `core.citations.match_citations` to bind each reply sentence to its
+   strongest-supporting chunk by lexical-token overlap and writes the
+   list of `CitationSpan` records to `state['citations']`. The
+   Streamlit reply renderer turns those spans into inline `<sup>`
+   markers (numbered by unique source, with a native-browser tooltip
+   showing the source + evidence preview) and a "Sources" expander.
 5. **Plan.** `plan_action` runs `chat.invoke_typed(..., BookingProposal)`
    against the agent reply and produces a typed proposal (or
    `action_type="none"`).
