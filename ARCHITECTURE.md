@@ -193,7 +193,20 @@ flowchart TB
    in one chat call. Both are written through the dedup-aware `put`
    (bumps a counter if a near-duplicate already exists).
 8. **Checkpoint.** LangGraph's `MongoDBSaver` persists the turn's
-   state to `checkpoints`, keyed by `thread_id`.
+   state to `checkpoints`, keyed by `thread_id`. The same checkpoint
+   trail powers two recovery flows: HIL approvals
+   (`Command(resume=…)`) and per-node failure retries (see below).
+9. **Retry on failure.** Any degraded marker that maps to a specific
+   node — `structured_failed:<node>`, `safe_retrieve` exceptions, or
+   `reflection_failed` — produces a **🔄 Retry `<node>`** button in the
+   Streamlit turn card. The button replays from the pre-node checkpoint
+   located by `find_retry_checkpoint`, which walks
+   `graph.get_state_history(config)` newest-first for the matching
+   `next` tuple, then streams the graph forward via
+   `graph.stream(None, anchor_config, …)` and replaces the turn in
+   place. Informational markers (`chat_fallback:*`, `structured_retry:*`,
+   `citations_missing`, `cost_extracted_via_fallback`, `draft_*`) are
+   not retryable and never surface a button.
 
 Out-of-band: `python -m tools.reflect` consolidates near-duplicate
 memories into canonical rows; `python -m evals.runner --mode live

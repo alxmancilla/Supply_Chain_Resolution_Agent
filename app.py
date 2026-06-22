@@ -22,7 +22,7 @@ from langgraph.types import Command
 
 load_dotenv()
 
-from agent.graph import get_graph
+from agent.graph import find_retry_checkpoint, get_graph, retryable_failures
 from agent.memory import (
     DB_NAME,
     EPISODES_COLLECTION,
@@ -112,6 +112,8 @@ def _init_state() -> None:
         st.session_state.pending_approval = None  # dict | None
     if "queued_prompt" not in st.session_state:
         st.session_state.queued_prompt = None  # str | None
+    if "queued_retry" not in st.session_state:
+        st.session_state.queued_retry = None  # dict | None — {"turn_index", "target_node"}
 
 
 def _new_session() -> None:
@@ -119,6 +121,7 @@ def _new_session() -> None:
     st.session_state.turns = []
     st.session_state.pending_approval = None
     st.session_state.queued_prompt = None
+    st.session_state.queued_retry = None
     reset_memory_cache()
 
 
@@ -292,6 +295,68 @@ def _resume_turn(*, approved: bool, approver: str) -> None:
         user_input=pending["user_input"],
         prior_interrupts=pending["interrupts"],
     )
+
+
+def _retry_from_node(turn_index: int, target_node: str) -> None:
+    """Re-run the turn at `turn_index` starting from `target_node`.
+
+    Uses LangGraph's checkpoint history: `find_retry_checkpoint` returns the
+    config of the most recent snapshot whose `next` contains `target_node`
+    (the state captured before the node ran). Streaming with `payload=None`
+    against that config replays the graph from that point forward. The
+    resulting turn record replaces the original in `session_state.turns`.
+    """
+    turns = st.session_state.turns
+    if not (0 <= turn_index < len(turns)):
+        return
+    turn = turns[turn_index]
+    graph = get_graph()
+    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+    anchor = find_retry_checkpoint(graph, config, target_node)
+    if anchor is None:
+        st.toast(
+            f"No checkpoint found before `{target_node}` — cannot retry.", icon="⚠️"
+        )
+        return
+    stream_box = st.empty()
+    stream_box.markdown(f"_retrying from `{target_node}`…_")
+    buffer: list[str] = []
+    result = _stream_invocation(graph, None, anchor, stream_box, buffer)
+    stream_box.empty()
+    if result.get("__interrupt__"):
+        intr = result["__interrupt__"][0]
+        payload_value = intr.value if hasattr(intr, "value") else intr
+        st.session_state.pending_approval = {
+            "user_input": turn["user"],
+            "interrupts": [payload_value if isinstance(payload_value, dict) else {"value": payload_value}],
+            "request": payload_value,
+            "partial_reply": "".join(buffer),
+        }
+        return
+    ai_message = ""
+    for msg in reversed(result.get("messages", [])):
+        if isinstance(msg, AIMessage):
+            ai_message = msg.content if isinstance(msg.content, str) else str(msg.content)
+            break
+    turns[turn_index] = {
+        **turn,
+        "ai": ai_message or turn.get("ai", ""),
+        "ltm_hits": result.get("ltm_hits", turn.get("ltm_hits", [])),
+        "rag_hits": result.get("rag_hits", turn.get("rag_hits", [])),
+        "episode_hits": result.get("episode_hits", turn.get("episode_hits", [])),
+        "procedure_hits": result.get("procedure_hits", turn.get("procedure_hits", [])),
+        "kg_hits": result.get("kg_hits", turn.get("kg_hits", [])),
+        "action_plan": result.get("action_plan", turn.get("action_plan", {})),
+        "booking_draft": result.get("booking_draft", turn.get("booking_draft", {})),
+        "procedure_proposal": result.get("procedure_proposal", turn.get("procedure_proposal", {})),
+        "latency_ms": result.get("latency_ms", turn.get("latency_ms", {})),
+        "usage": result.get("usage", turn.get("usage", {})),
+        "degraded": result.get("degraded", []),
+        "routing": result.get("routing", turn.get("routing", {})),
+        "citations": result.get("citations", turn.get("citations", [])),
+        "retried_from": target_node,
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+    }
 
 
 def _render_approval_card() -> None:
@@ -558,6 +623,29 @@ def _render_cited_reply(reply: str, citations: list[dict]) -> None:
                 st.caption(evidence[:600] + ("…" if len(evidence) > 600 else ""))
 
 
+def _render_retry_buttons(turn: dict, index: int) -> None:
+    """Render one '🔄 Retry <node>' button per retryable failure marker.
+
+    Click queues `session_state.queued_retry`; the main loop reruns and
+    `_retry_from_node` replays the graph from a historical checkpoint.
+    """
+    pairs = retryable_failures(turn.get("degraded"))
+    if not pairs:
+        return
+    pending = bool(st.session_state.get("pending_approval"))
+    cols = st.columns(min(len(pairs), 4))
+    for i, (marker, node) in enumerate(pairs):
+        if cols[i % len(cols)].button(
+            f"🔄 Retry `{node}`",
+            key=f"retry_{index}_{node}",
+            help=f"Replay from the checkpoint before `{node}` (marker: {marker}).",
+            disabled=pending,
+            use_container_width=True,
+        ):
+            st.session_state.queued_retry = {"turn_index": index, "target_node": node}
+            st.rerun()
+
+
 def _render_turn(turn: dict, index: int) -> None:
     with st.chat_message("user"):
         st.markdown(turn["user"])
@@ -574,6 +662,9 @@ def _render_turn(turn: dict, index: int) -> None:
             )
         if turn.get("degraded"):
             st.warning("⚠️ Degraded retrieval: " + " · ".join(turn["degraded"]))
+            _render_retry_buttons(turn, index)
+        if turn.get("retried_from"):
+            st.caption(f"↻ Retried from `{turn['retried_from']}`.")
         with st.expander(f"Semantic LTM ({len(turn['ltm_hits'])} memories)", expanded=False):
             skip = _routing_caption(turn, "ltm")
             if skip:
@@ -690,6 +781,12 @@ def main() -> None:
         if queued and not pending:
             st.session_state.queued_prompt = None
             user_input = queued
+        queued_retry = st.session_state.queued_retry
+        if queued_retry and not pending:
+            st.session_state.queued_retry = None
+            with st.spinner(f"Retrying from `{queued_retry['target_node']}`..."):
+                _retry_from_node(queued_retry["turn_index"], queued_retry["target_node"])
+            st.rerun()
         if user_input and not pending:
             with st.spinner("Running agent (parallel retrieve → LLM → save)..."):
                 _run_turn(user_input)

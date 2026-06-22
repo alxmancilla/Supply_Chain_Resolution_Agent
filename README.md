@@ -269,6 +269,11 @@ When a turn proposes a booking over `$10,000`, the chat input is
 disabled and an inline approval card with **Approve & execute** /
 **Reject** buttons appears. The graph state is held in the LangGraph
 checkpointer; resuming with `Command(resume=…)` finalizes the draft.
+When a turn surfaces a retryable failure (`structured_failed:<node>`,
+a `safe_retrieve` exception, or `reflection_failed`), a **🔄 Retry
+`<node>`** button appears under the yellow degraded banner; clicking
+it replays the graph from the pre-node checkpoint located via
+`graph.get_state_history()` and replaces the turn in place.
 **New Session** starts a fresh chat but keeps the user's LTM, the KG,
 and prior `booking_drafts`.
 

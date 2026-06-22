@@ -82,10 +82,13 @@ the ones that don't apply at our scale.
 - **Files:** `core/citations.py` (new), `agent/nodes.py`, `app.py`, `tests/test_nodes.py`.
 - **Acceptance:** ✅ 8 new tests (sentence-splitter offsets, highest-overlap pick, score tie-break, empty inputs, overlap-floor skip, KG fact matching, plus 2 `validate_citations` integration tests); 201/201 pass. End-to-end smoke on a recommend-shipment turn attached 4 citations bound to the right RAG chunks + 1 KG fact with `degraded=[]`.
 
-### 8. Resume-from-failed-node UX
-- **Why:** Already have checkpoint-based resume for interrupts; extend it to failure recovery.
-- **Scope:** "Retry from failure" button in Streamlit using `graph.invoke(Command(resume=...))` against the persisted checkpoint at the failed node.
-- **Files:** `app.py`, `agent/graph.py`.
+### 8. Resume-from-failed-node UX ✅
+- **Why:** Already had checkpoint-based resume for HIL interrupts; extending it to failure recovery means a transient backend hiccup or a one-off structured-output exhaustion can be retried in place without re-running the rest of the turn.
+- **Scope (shipped):**
+  1. `agent/graph.py` exports `parse_failure_marker(marker) -> node | None`, `retryable_failures(degraded) -> [(marker, node)]`, and `find_retry_checkpoint(graph, config, target_node) -> config | None`. The parser maps `structured_failed:<node>`, `safe_retrieve` markers (`retrieve_*: <ExcType>: <msg>`, `classify_intent: <ExcType>: <msg>`), and `reflection_failed` to their originating node; informational markers (`chat_fallback:*`, `structured_retry:*`, `cost_extracted_via_fallback`, `citations_missing`, `evidence_insufficient`, `draft_*`) are intentionally skipped. The checkpoint lookup walks `graph.get_state_history(config)` newest-first and returns the `config` of the most recent snapshot whose `next` contains `target_node` — the LangGraph time-travel anchor.
+  2. `app.py` renders one **🔄 Retry `<node>`** button per retryable failure under the existing yellow degraded banner; clicking queues `session_state.queued_retry` and the main loop calls `_retry_from_node`, which streams `graph.stream(None, anchor_config, ...)` from the located checkpoint and replaces the turn record in place (preserving the user turn, replacing AI reply / hits / latency / citations and tagging `retried_from`). HIL interrupts mid-retry are routed through the existing approval card.
+- **Files:** `agent/graph.py`, `app.py`, `tests/test_nodes.py`.
+- **Acceptance:** ✅ 8 new tests (marker parser across all marker shapes, informational-skip set, dedupe-by-node ordering, empty-input handling, history-walk newest-first, error-swallowing on missing checkpointer); 209/209 pass.
 
 ### 9. Context-discipline audit
 - **Why:** `generate_response` currently receives every `*_context` blob regardless of router choice (modulo `_ctx_for`). Trim more aggressively per-intent.
@@ -103,6 +106,7 @@ the ones that don't apply at our scale.
 Items 1-6 deliver the highest user-visible quality gains (T&P + Reflection,
 hybrid RAG, cross-provider fallback, self-correcting structured output,
 live-traffic drift detection, and the opt-in draft reviewer). P2.7 layered
-per-sentence citations on top without adding LLM calls or graph edges.
-The remaining P2 items (#8, #9) sharpen operability without reshaping the
-agent. P3 is on standby until product scope demands it.
+per-sentence citations on top without adding LLM calls or graph edges; P2.8
+extended LangGraph's existing HIL-resume primitive to in-place failure
+recovery (no new persistence, no new node). Remaining P2 work (#9) sharpens
+context discipline. P3 is on standby until product scope demands it.

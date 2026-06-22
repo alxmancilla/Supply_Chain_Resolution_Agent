@@ -994,3 +994,114 @@ def test_citations_match_uses_kg_facts():
     assert len(spans) == 1
     assert spans[0]["kind"] == "kg"
     assert spans[0]["source"] == "kg/tx_az.json"
+
+
+
+# ---------------------- P2 #8: retry-from-failed-node helpers ----------------------
+
+
+def test_parse_failure_marker_recognises_structured_failed():
+    from agent.graph import parse_failure_marker
+
+    assert parse_failure_marker("structured_failed:plan_action") == "plan_action"
+    assert parse_failure_marker("structured_failed:reflect_on_evidence") == "reflect_on_evidence"
+    assert parse_failure_marker("structured_failed:save_memory") == "save_memory"
+    assert parse_failure_marker("structured_failed:review_draft") == "review_draft"
+
+
+def test_parse_failure_marker_recognises_safe_retrieve_markers():
+    from agent.graph import parse_failure_marker
+
+    assert parse_failure_marker("retrieve_rag: TimeoutError: connection timed out") == "retrieve_rag"
+    assert parse_failure_marker("retrieve_kg: ValueError: bad cursor") == "retrieve_kg"
+    assert parse_failure_marker("classify_intent: RuntimeError: router down") == "classify_intent"
+
+
+def test_parse_failure_marker_recognises_reflection_failure():
+    from agent.graph import parse_failure_marker
+
+    assert parse_failure_marker("reflection_failed") == "save_memory"
+
+
+def test_parse_failure_marker_skips_informational_markers():
+    from agent.graph import parse_failure_marker
+
+    for marker in (
+        "chat_fallback:openai",
+        "structured_retry:plan_action",
+        "cost_extracted_via_fallback",
+        "citations_missing",
+        "evidence_insufficient",
+        "draft_review_ok",
+        "draft_revised",
+        "draft_review_skipped:short_reply",
+        "",
+        "unknown_marker",
+    ):
+        assert parse_failure_marker(marker) is None, marker
+
+
+def test_retryable_failures_dedupes_by_node_and_preserves_order():
+    from agent.graph import retryable_failures
+
+    out = retryable_failures([
+        "chat_fallback:openai",
+        "structured_failed:plan_action",
+        "retrieve_rag: TimeoutError: x",
+        "structured_failed:plan_action",  # dup → collapsed
+        "reflection_failed",
+        "citations_missing",
+    ])
+    assert out == [
+        ("structured_failed:plan_action", "plan_action"),
+        ("retrieve_rag: TimeoutError: x", "retrieve_rag"),
+        ("reflection_failed", "save_memory"),
+    ]
+
+
+def test_retryable_failures_handles_empty_input():
+    from agent.graph import retryable_failures
+
+    assert retryable_failures(None) == []
+    assert retryable_failures([]) == []
+
+
+def test_find_retry_checkpoint_walks_history_newest_first():
+    """`find_retry_checkpoint` returns the most recent snapshot whose `next` contains the target."""
+    from agent.graph import find_retry_checkpoint
+
+    class _Snap:
+        def __init__(self, nxt, cid):
+            self.next = nxt
+            self.config = {"configurable": {"checkpoint_id": cid}}
+
+    class _FakeGraph:
+        def __init__(self, history):
+            self._history = history
+        def get_state_history(self, _config):
+            return iter(self._history)
+
+    history = [
+        _Snap(("save_memory",), "ck-3"),
+        _Snap(("plan_action",), "ck-2-newest-plan"),
+        _Snap(("plan_action",), "ck-2-older-plan"),
+        _Snap(("retrieve_rag",), "ck-1"),
+    ]
+    graph = _FakeGraph(history)
+    config = {"configurable": {"thread_id": "t1"}}
+
+    cfg = find_retry_checkpoint(graph, config, "plan_action")
+    assert cfg == {"configurable": {"checkpoint_id": "ck-2-newest-plan"}}
+    cfg = find_retry_checkpoint(graph, config, "retrieve_rag")
+    assert cfg == {"configurable": {"checkpoint_id": "ck-1"}}
+    assert find_retry_checkpoint(graph, config, "nonexistent_node") is None
+
+
+def test_find_retry_checkpoint_swallows_history_errors():
+    from agent.graph import find_retry_checkpoint
+
+    class _BoomGraph:
+        def get_state_history(self, _config):
+            raise RuntimeError("checkpointer offline")
+
+    assert find_retry_checkpoint(_BoomGraph(), {"configurable": {}}, "plan_action") is None
