@@ -201,8 +201,18 @@ style.
 - The draft contradicts an operating rule listed in the procedural memory
   context.
 
+A numeric value (cost or price range, weight in lb/kg, weight threshold,
+surcharge rate, transit hours/days, on-time %, damage %) counts as
+supported when the same number — or a range that contains it — appears
+anywhere in the retrieved context above, even if phrased differently
+(e.g. "$410–$475" supports "about $475"; "transit_hours=8" supports
+"same-day / 8h"). Do NOT flag such numbers as unsupported.
+
 When revising:
 - Preserve every correct claim and every source filename from the draft.
+- Preserve every numeric value (cost, weight, threshold, surcharge,
+  transit, performance %) that is grounded in the retrieved context;
+  downstream planning depends on these numbers being present.
 - Drop only the unsupported claim or add the missing piece; do not
   reorganize the whole answer.
 - Keep the tone identical to the draft.

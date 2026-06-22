@@ -183,7 +183,7 @@
           "score": 1.0,
           "expected": "fallback",
           "actual": "fallback",
-          "notes": "Greeting without actionable supply chain intent"
+          "notes": "Greeting without supply chain intent"
         },
         {
           "case_id": "int_20",
@@ -191,7 +191,7 @@
           "score": 1.0,
           "expected": "fallback",
           "actual": "fallback",
-          "notes": "Unclear user intent"
+          "notes": "Unclear user request"
         }
       ]
     },
@@ -199,10 +199,10 @@
       "name": "rag_recall_at_k",
       "dataset": "/Users/mancilla/sw/Supply_Chain_Resolution_Agent/evals/datasets/rag_retrieval.jsonl",
       "n": 13,
-      "passed": 13,
-      "score": 1.0,
+      "passed": 9,
+      "score": 0.6923076923076923,
       "extras": {
-        "mean_recall": 1.0
+        "mean_recall": 0.8462
       },
       "cases": [
         {
@@ -215,29 +215,29 @@
           ],
           "actual": [
             "carrier_agreements/carrier_a_2026.pdf",
+            "policies/fuel_surcharge_methodology.pdf",
+            "route_guides/austin_dallas_hot_lane.pdf",
             "route_guides/tx_tx_lane.pdf",
-            "carrier_agreements/carrier_b_2026.pdf",
-            "route_guides/tx_az_lane.pdf",
-            "policies/hours_of_service.pdf"
+            "carrier_agreements/carrier_b_2026.pdf"
           ],
           "notes": "recall=1.00 k=5"
         },
         {
           "case_id": "rag_02",
-          "passed": true,
-          "score": 1.0,
+          "passed": false,
+          "score": 0.5,
           "expected": [
             "carrier_agreements/carrier_a_2026.pdf",
             "route_guides/tx_az_lane.pdf"
           ],
           "actual": [
+            "policies/fuel_surcharge_methodology.pdf",
+            "policies/fuel_surcharge_methodology.pdf",
             "carrier_agreements/carrier_a_2026.pdf",
-            "route_guides/tx_az_lane.pdf",
-            "route_guides/tx_tx_lane.pdf",
-            "carrier_agreements/carrier_b_2026.pdf",
-            "carrier_agreements/carrier_a_2026.pdf"
+            "policies/fuel_surcharge_methodology.pdf",
+            "policies/fuel_surcharge_methodology.pdf"
           ],
-          "notes": "recall=1.00 k=5"
+          "notes": "recall=0.50 k=5"
         },
         {
           "case_id": "rag_03",
@@ -248,9 +248,7 @@
           ],
           "actual": [
             "carrier_agreements/carrier_b_2026.pdf",
-            "route_guides/tx_ca_lane.pdf",
-            "route_guides/tx_az_lane.pdf",
-            "policies/approval_thresholds.pdf",
+            "carrier_agreements/carrier_b_2026.pdf",
             "carrier_agreements/carrier_b_2026.pdf"
           ],
           "notes": "recall=1.00 k=5"
@@ -267,43 +265,39 @@
             "playbooks/late_delivery.pdf",
             "playbooks/late_delivery.pdf",
             "playbooks/late_delivery.pdf",
-            "playbooks/carrier_no_show.pdf"
+            "playbooks/late_delivery.pdf"
           ],
           "notes": "recall=1.00 k=5"
         },
         {
           "case_id": "rag_05",
-          "passed": true,
-          "score": 1.0,
+          "passed": false,
+          "score": 0.5,
           "expected": [
             "carrier_agreements/carrier_a_2026.pdf",
             "playbooks/damaged_goods.pdf"
           ],
           "actual": [
             "playbooks/damaged_goods.pdf",
-            "carrier_agreements/carrier_a_2026.pdf",
-            "carrier_agreements/carrier_b_2026.pdf",
             "policies/claims_and_insurance.pdf",
-            "playbooks/damaged_goods.pdf"
+            "playbooks/damaged_goods.pdf",
+            "route_guides/tx_tx_lane.pdf",
+            "route_guides/tx_az_lane.pdf"
           ],
-          "notes": "recall=1.00 k=5"
+          "notes": "recall=0.50 k=5"
         },
         {
           "case_id": "rag_06",
-          "passed": true,
-          "score": 1.0,
+          "passed": false,
+          "score": 0.5,
           "expected": [
             "carrier_agreements/carrier_b_2026.pdf",
             "playbooks/weight_discrepancy.pdf"
           ],
           "actual": [
-            "playbooks/weight_discrepancy.pdf",
-            "playbooks/weight_discrepancy.pdf",
-            "playbooks/weight_discrepancy.pdf",
-            "playbooks/weight_discrepancy.pdf",
             "carrier_agreements/carrier_b_2026.pdf"
           ],
-          "notes": "recall=1.00 k=5"
+          "notes": "recall=0.50 k=5"
         },
         {
           "case_id": "rag_07",
@@ -313,10 +307,10 @@
             "policies/approval_thresholds.pdf"
           ],
           "actual": [
+            "policies/customer_profile_acme.pdf",
             "policies/approval_thresholds.pdf",
-            "policies/approval_thresholds.pdf",
+            "carrier_agreements/carrier_a_expedited_addendum_2026.pdf",
             "playbooks/carrier_no_show.pdf",
-            "policies/approval_thresholds.pdf",
             "policies/approval_thresholds.pdf"
           ],
           "notes": "recall=1.00 k=5"
@@ -329,30 +323,29 @@
             "route_guides/tx_ca_lane.pdf"
           ],
           "actual": [
-            "policies/hours_of_service.pdf",
-            "carrier_agreements/carrier_a_2026.pdf",
-            "carrier_agreements/carrier_b_2026.pdf",
-            "route_guides/az_ca_lane.pdf",
+            "route_guides/tx_ca_lane.pdf",
+            "route_guides/tx_ca_lane.pdf",
+            "route_guides/tx_ca_lane.pdf",
             "route_guides/tx_ca_lane.pdf"
           ],
           "notes": "recall=1.00 k=5"
         },
         {
           "case_id": "rag_09",
-          "passed": true,
-          "score": 1.0,
+          "passed": false,
+          "score": 0.5,
           "expected": [
             "carrier_agreements/carrier_c_2026.pdf",
             "route_guides/az_ca_lane.pdf"
           ],
           "actual": [
-            "carrier_agreements/carrier_c_2026.pdf",
             "route_guides/az_ca_lane.pdf",
             "route_guides/az_ca_lane.pdf",
-            "policies/hours_of_service.pdf",
+            "route_guides/az_ca_lane.pdf",
+            "route_guides/az_ca_lane.pdf",
             "route_guides/az_ca_lane.pdf"
           ],
-          "notes": "recall=1.00 k=5"
+          "notes": "recall=0.50 k=5"
         },
         {
           "case_id": "rag_10",
@@ -379,10 +372,10 @@
           ],
           "actual": [
             "policies/freight_guidelines_appointments.pdf",
-            "policies/freight_guidelines_appointments.pdf",
             "carrier_agreements/carrier_b_2026.pdf",
-            "route_guides/tx_ca_lane.pdf",
-            "policies/hours_of_service.pdf"
+            "route_guides/tx_az_lane.pdf",
+            "route_guides/austin_dallas_hot_lane.pdf",
+            "scorecards/2026_q1_carrier_summary.pdf"
           ],
           "notes": "recall=1.00 k=5"
         },
@@ -396,9 +389,9 @@
           "actual": [
             "policies/vendor_list.pdf",
             "policies/vendor_list.pdf",
+            "scorecards/2026_q1_carrier_summary.pdf",
             "policies/vendor_list.pdf",
-            "carrier_agreements/carrier_b_2026.pdf",
-            "carrier_agreements/carrier_a_2026.pdf"
+            "policies/customer_profile_acme.pdf"
           ],
           "notes": "recall=1.00 k=5"
         },
@@ -412,9 +405,9 @@
           "actual": [
             "policies/hours_of_service.pdf",
             "policies/hours_of_service.pdf",
-            "policies/hours_of_service.pdf",
-            "route_guides/tx_ca_lane.pdf",
-            "policies/hours_of_service.pdf"
+            "route_guides/austin_dallas_hot_lane.pdf",
+            "route_guides/az_ca_lane.pdf",
+            "route_guides/austin_dallas_hot_lane.pdf"
           ],
           "notes": "recall=1.00 k=5"
         }

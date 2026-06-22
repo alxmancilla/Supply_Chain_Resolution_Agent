@@ -133,3 +133,26 @@ def test_route_after_writer_branches_on_flag(monkeypatch):
     assert graph_mod._route_after_writer({}) == "validate_citations"
     monkeypatch.setattr(graph_mod, "get_settings", lambda: _settings(enabled=True))
     assert graph_mod._route_after_writer({}) == "review_draft"
+
+
+def test_review_draft_prompt_preserves_grounded_numbers(monkeypatch, context):
+    """Reviewer prompt must include grounded numbers from the evidence and
+    instruct the LLM to preserve them; downstream `plan_action` extracts
+    `estimated_cost_usd` from the draft and breaks when numbers are dropped.
+    """
+    payload = json.dumps({"needs_revision": False, "revised_reply": None, "reasons": ["numeric claims grounded"]})
+    chat = FakeChatProvider(reply=payload, usage={"input_tokens": 40, "output_tokens": 10})
+    monkeypatch.setattr(nodes, "get_settings", lambda: _settings(enabled=True, min_chars=10))
+    monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
+    draft = (
+        "Recommendation: Carrier A dry van for 15,000 lb Austin-to-Dallas. "
+        "Typical all-in quote $410-$475. Sources: route_guides/austin_dallas_hot_lane.pdf"
+    )
+    evidence = "Carrier A; Austin-Dallas; 15,000 lb; typical all-in $410-$475; transit 8h. (austin_dallas_hot_lane.pdf)"
+    out = review_draft(_draft_state(context, draft=draft, rag_context=evidence))
+    assert out.get("degraded") == ["draft_review_ok"]
+    assert len(chat.calls) == 1
+    prompt = chat.calls[0]
+    assert "$410-$475" in prompt
+    assert "15,000 lb" in prompt
+    assert "Preserve every numeric value" in prompt
