@@ -32,8 +32,9 @@ This is the **default architecture and tech stack** for any new agent built in t
 | Layer | Default | Notes |
 |---|---|---|
 | Orchestration | `langgraph==1.2.5` | `StateGraph`, `interrupt()`, `MongoDBSaver` checkpointer, custom-channel streaming via `get_stream_writer`. |
-| Storage / Search | MongoDB Atlas, one cluster | Vector Search for embeddings, b-tree for KG joins, `$graphLookup` for traversals. |
+| Storage / Search | MongoDB Atlas, one cluster | Vector Search for embeddings, b-tree for KG joins, `$graphLookup` for traversals, optional `$search` (BM25) for hybrid retrieval on the RAG corpus. |
 | Embeddings | `voyageai==0.4.0`, model `voyage-4` (1024 dim) | Call `voyageai.Client(...).embed(texts, model=..., input_type="query"|"document")` directly. **Do not** depend on `langchain-voyageai` (Python version gating bug). |
+| Rerank (RAG only) | `voyageai` cross-encoder, model `rerank-2-lite` | Gated on `RAG_RERANK_ENABLED`; `NullReranker` (identity, trim-to-k) is the default. Production deployments enable Voyage rerank; rerank only the RAG branch, never KG / LTM / episodes / procedures. |
 | Chat | OpenAI-compatible via `langchain-openai>=1.0` | Other backends go in `core/providers/chat/`. |
 | UI | Streamlit | Token streaming, per-turn latency, retrieved-chunk inspector, degraded-state banner. |
 | Telemetry | OpenTelemetry (optional, `OTEL_ENABLED=1`) | OTLP endpoint configurable. |
@@ -150,6 +151,13 @@ Grouped by concern. Each rule has a short rationale followed by a normalized min
 
 13. **Vector-dim preflight.** On startup, `_assert_vector_index_dims` checks every vector index matches the active embedding provider's `dimensions`. Fail loud if mismatched.
 
+### F. Retrieval quality
+
+14. **Hybrid retrieval + cross-encoder rerank (RAG branch only).** `MongoKnowledgeRetriever` fans out a `$vectorSearch` query and (optionally) a `$search` BM25 query, fuses results with reciprocal-rank fusion, over-fetches `RAG_FUSION_CANDIDATES`, then optionally hands the candidate list to a cross-encoder reranker that **replaces** the fusion score and trims to top-k. Implement the `Reranker` protocol in `core/protocols.py`; ship two implementations in `core/rag/rerank.py`.
+    - *Contract:* `MongoKnowledgeRetriever(..., hybrid_enabled, vector_weight, bm25_weight, fusion_candidates, reranker)`. `NullReranker` (identity, trim-to-k) is the default and is also used in every unit test so the suite stays offline. `VoyageReranker(model=RAG_RERANK_MODEL)` is the production default when `RAG_RERANK_ENABLED=1`. Apply rerank **only to the RAG branch** — KG (b-tree joins), LTM / episodes (`$vectorSearch` over `agent_memories_vector`), and procedures already return authoritative scores; reranking them wastes paid API calls without improving ordering.
+    - *Settings:* `RAG_HYBRID_ENABLED` (default false), `RAG_RERANK_ENABLED` (default false), `RAG_VECTOR_WEIGHT=1.0`, `RAG_BM25_WEIGHT=1.0`, `RAG_FUSION_CANDIDATES=20`, `RAG_RERANK_MODEL=rerank-2-lite`, `RAG_SEARCH_INDEX_NAME=knowledge_corpus_search`. The `_fusion_candidates` over-fetch only runs when hybrid OR rerank is enabled, so a default deployment pays no extra Atlas cost.
+    - *Failure mode:* the rerank call is a remote paid API with its own rate limits and failure modes. The current pattern leans on the outer `@safe_retrieve("retrieve_rag", ...)` to absorb a Voyage outage — a rerank exception degrades the entire RAG branch with a `retrieve_rag: <ExcType>: <msg>` marker rather than crashing the turn. If you need finer-grained behaviour (return the un-reranked candidate list when only the rerank step fails), wrap the `self._reranker.rerank(...)` call inside `MongoKnowledgeRetriever.query` with a try/except that falls back to `NullReranker().rerank(...)` and appends a marker — but never silently mix re-ranked and un-re-ranked scores in the same hit list.
+
 ## Default collections (single DB, one per concern)
 
 | Collection | Mutability | Scope keys | Notes |
@@ -187,7 +195,7 @@ These are non-optional once the agent leaves the demo box. Add them to the test 
 ## Quality bar (do not ship without)
 
 - ≥ 100 unit tests with in-memory fakes — suite runs in seconds without Atlas, Voyage, or chat credentials.
-- Tests for every retriever's degraded path, the citation validator + per-sentence binder, the reset-reducer, the interrupt/resume flow, the failure→retry helper that maps degraded markers to checkpointed nodes, the structured-output retry helper (success, malformed-then-recover, exhaustion, composition through the fallback chain, marker emission), the cross-provider fallback chain (retryable→advance, non-retryable→short-circuit, exhausted-chain error, `chat_fallback:<provider>` marker), the Reviewer skip paths + revise/approve paths when `REVIEW_DRAFT_ENABLED=1`, and the context-discipline assembler (skipped-branch and empty-payload omission).
+- Tests for every retriever's degraded path, the citation validator + per-sentence binder, the reset-reducer, the interrupt/resume flow, the failure→retry helper that maps degraded markers to checkpointed nodes, the structured-output retry helper (success, malformed-then-recover, exhaustion, composition through the fallback chain, marker emission), the cross-provider fallback chain (retryable→advance, non-retryable→short-circuit, exhausted-chain error, `chat_fallback:<provider>` marker), the Reviewer skip paths + revise/approve paths when `REVIEW_DRAFT_ENABLED=1`, the context-discipline assembler (skipped-branch and empty-payload omission), and the RAG retriever's rerank path (`NullReranker` identity ordering, `VoyageReranker` score replacement, over-fetch to `RAG_FUSION_CANDIDATES`, rerank only on the RAG branch).
 - A live eval suite (`evals/runner.py`) with a baseline file and `--score-tolerance` / `--latency-factor` regression guards. Re-capture the baseline whenever prompt assembly, the Reviewer toggle, or the retry helpers change — token counts and latency shift.
 - A `db/indexes.py` bootstrapper documented in the README; missing indexes cause silent zero-hit retrieval — always provision explicitly.
 
@@ -208,6 +216,8 @@ These are non-optional once the agent leaves the demo box. Add them to the test 
 - Letting the Reviewer strip grounded numeric claims (cost, weight, surcharge, transit) — downstream `plan_action` reads those numbers; the reviewer prompt MUST preserve them and the smoke test MUST cover a revise turn whose `estimated_cost_usd` survives.
 - Streaming through a fallback chain expecting mid-stream failover — `FallbackChatProvider` only protects `invoke` / `invoke_typed`; `stream` calls the primary's underlying client directly.
 - Treating retrieved RAG / KG / episode / procedure content as instructions instead of data — a prompt-injection vector. The operating-rules preamble MUST tell the Writer to ignore any instructions inside retrieved content.
+- Reranking KG, LTM, episode, or procedure hits — those collections already return authoritative scores; only the RAG corpus benefits from a cross-encoder rerank. Reranking the others burns paid API calls without changing ordering.
+- Wiring `VoyageReranker` without an outer `@safe_retrieve("retrieve_rag", ...)` on the RAG node — a Voyage rerank outage will then crash the RAG branch unprotected, leaking the raw `voyageai` exception into `degraded` instead of degrading cleanly to "no RAG context this turn".
 
 ### Production hazards
 
@@ -223,13 +233,14 @@ These are non-optional once the agent leaves the demo box. Add them to the test 
 
 ### Phase 0 — Scaffolding
 
-- Scaffold the six layers; copy `core/protocols.py`, `core/resilience.py`, `core/latency.py`, `core/observability.py`, `core/providers/chat/retry.py`, and `core/providers/chat/fallback.py` as-is.
+- Scaffold the six layers; copy `core/protocols.py` (includes `Reranker`), `core/resilience.py`, `core/latency.py`, `core/observability.py`, `core/rag/rerank.py` (`NullReranker` + `VoyageReranker`), `core/providers/chat/retry.py`, and `core/providers/chat/fallback.py` as-is.
 - Define the domain `AgentContext`, `AgentState`, and any typed `*Proposal` schemas in `core/schemas.py`. Add `BranchName` + `ALL_BRANCHES` so the router, planner, and prompt assembler agree on names.
 
 ### Phase 1 — Capabilities & storage
 
 - Implement retrievers behind the relevant protocols; wrap each with `@safe_retrieve` and `@timed`.
-- Add `db/indexes.py` for every vector + b-tree index your collections need; make it idempotent (`_index_exists()` check before create).
+- For the RAG retriever, pass `hybrid_enabled`, `vector_weight`, `bm25_weight`, `fusion_candidates`, and a `reranker` (`NullReranker()` by default; `VoyageReranker(model=RAG_RERANK_MODEL)` when `RAG_RERANK_ENABLED=1`) to `MongoKnowledgeRetriever`. Rerank only the RAG branch.
+- Add `db/indexes.py` for every vector + b-tree index your collections need (including the `$search` index `knowledge_corpus_search` if you enable hybrid); make it idempotent (`_index_exists()` check before create).
 - Write in-memory fakes in `tests/fakes.py` first; the suite must run offline with zero Atlas, Voyage, or chat credentials.
 
 ### Phase 2 — Graph wiring
