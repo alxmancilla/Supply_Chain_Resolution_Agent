@@ -218,7 +218,7 @@ for tests, so backends and providers are swappable.
 
 ## Prerequisites
 
-- Python 3.11+ (tested on 3.13)
+- Python 3.11+ (tested on 3.13 and 3.14)
 - MongoDB Atlas cluster with Vector Search enabled (M10+ recommended; M30 + S20
   search nodes for a snappy demo)
 - API keys: Voyage AI (`voyage-4`), Grove gateway (GPT-5.5)

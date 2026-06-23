@@ -53,7 +53,7 @@ Examples below (`BookingProposal`, `booking_drafts`, `kg_carriers` / `kg_lanes`,
 | Tests | `pytest` with in-memory fakes for Atlas, embeddings, chat | The suite must run offline with zero credentials. |
 | Evals | `evals/runner.py` with a JSON baseline and `--score-tolerance` / `--latency-factor` regression guards | Live calls; re-capture baseline after any prompt-assembly, Reviewer, or retry-helper change. |
 | Settings | Frozen `@dataclass` in `core/settings.py`, env-var-driven, read once via `@lru_cache get_settings()` | All tunables (model ids, prices, retry budgets, feature flags) live here; nodes never read `os.environ` directly. |
-| Python | `>=3.10,<3.14` | Pin `python3.13` in README for `voyageai` compatibility. |
+| Python | `>=3.11` | Tested on 3.13 and 3.14. The earlier `<3.14` cap was a `langchain-voyageai` workaround; the `voyageai` SDK has no such gate. |
 
 ## Required state and reducers
 
