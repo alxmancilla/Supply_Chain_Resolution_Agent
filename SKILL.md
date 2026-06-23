@@ -18,6 +18,18 @@ This is the **default architecture and tech stack** for any new agent built in t
 - The agent must persist across turns, be multi-tenant, and have human-in-the-loop checkpoints.
 - The user does not specify a stack — these are the defaults.
 
+## When NOT to apply
+
+- A one-shot RAG demo, notebook, or batch script with no cross-turn persistence — use a plain retriever + LLM call.
+- A pure CRUD app or ETL pipeline with no conversational state.
+- The user has prescribed a different stack (e.g. LlamaIndex + Pinecone, LangChain Agents + Postgres) — defer to their choice.
+- The only "memory" needed is a chat-history window — use LangGraph's `MemorySaver` directly; the three-layer LTM here is overkill.
+- A workflow that never needs human approval and never persists side effects — the HIL + `interrupt()` machinery is dead weight.
+
+## Domain disclaimer
+
+Examples below (`BookingProposal`, `booking_drafts`, `kg_carriers` / `kg_lanes`, `_extract_cost_fallback`, `[REQUIRES HUMAN APPROVAL]`, `data/corpus_content.py`) come from the logistics agent in this repo. **Substitute your domain's nouns when applying** — the patterns are domain-agnostic, the names are not.
+
 ## Non-negotiable architecture rules
 
 1. **Single MongoDB Atlas cluster** holds everything: short-term checkpoints, long-term memory (3 kinds), knowledge graph, RAG corpus, action drafts, agent registry. Do not split storage backends.
