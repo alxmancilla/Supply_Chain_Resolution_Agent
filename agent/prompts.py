@@ -1,7 +1,9 @@
 """Prompt templates for the Supply Chain Resolution Agent."""
 from __future__ import annotations
 
-SYSTEM_PROMPT = """You are a Supply Chain Resolution Specialist. You handle
+from typing import Mapping
+
+SYSTEM_PROMPT_BASE = """You are a Supply Chain Resolution Specialist. You handle
 shipment exceptions, recommend carriers, and resolve customer escalations
 for the logistics platform.
 
@@ -28,33 +30,58 @@ Operating rules:
    separated (e.g. `Sources: route_guides/austin_dallas_hot_lane.pdf,
    carrier_agreements/carrier_a_2026.pdf`). Omit the line only when no
    RAG or KG context was provided this turn.
-
-Semantic memory — durable user preferences and facts (cross-session):
----
-{ltm_context}
----
-
-Episodic memory — past shipments and outcomes for this user (cross-session):
----
-{episodic_context}
----
-
-Procedural memory — learned operating rules for this tenant (always apply):
----
-{procedural_context}
----
-
-Retrieved knowledge corpus chunks (top-k, pre-filtered by tenant):
----
-{rag_context}
----
-
-Structured facts (knowledge graph — multi-hop $graphLookup; cite the source_doc
-listed at the end of each line as you would a route guide):
----
-{kg_context}
----
 """
+
+
+SYSTEM_PROMPT_BRANCH_ORDER: tuple[str, ...] = (
+    "ltm", "episodes", "procedures", "rag", "kg",
+)
+
+
+_BRANCH_SECTION_TEMPLATES: dict[str, str] = {
+    "ltm": (
+        "Semantic memory — durable user preferences and facts (cross-session):\n"
+        "---\n{content}\n---"
+    ),
+    "episodes": (
+        "Episodic memory — past shipments and outcomes for this user (cross-session):\n"
+        "---\n{content}\n---"
+    ),
+    "procedures": (
+        "Procedural memory — learned operating rules for this tenant (always apply):\n"
+        "---\n{content}\n---"
+    ),
+    "rag": (
+        "Retrieved knowledge corpus chunks (top-k, pre-filtered by tenant):\n"
+        "---\n{content}\n---"
+    ),
+    "kg": (
+        "Structured facts (knowledge graph — multi-hop $graphLookup; cite the source_doc\n"
+        "listed at the end of each line as you would a route guide):\n"
+        "---\n{content}\n---"
+    ),
+}
+
+
+def build_system_prompt(branch_contexts: Mapping[str, str]) -> str:
+    """Assemble the system prompt with only the supplied branch sections.
+
+    `branch_contexts` keys must come from `SYSTEM_PROMPT_BRANCH_ORDER`;
+    branches absent from the mapping — or mapped to an empty / whitespace
+    value — are omitted entirely (header, delimiters, and content all
+    dropped). Section order follows `SYSTEM_PROMPT_BRANCH_ORDER` regardless
+    of insertion order. When no sections survive, the operating-rules
+    preamble is returned alone.
+    """
+    sections: list[str] = []
+    for branch in SYSTEM_PROMPT_BRANCH_ORDER:
+        content = (branch_contexts.get(branch) or "").strip()
+        if not content:
+            continue
+        sections.append(_BRANCH_SECTION_TEMPLATES[branch].format(content=content))
+    if not sections:
+        return SYSTEM_PROMPT_BASE
+    return SYSTEM_PROMPT_BASE + "\n" + "\n\n".join(sections) + "\n"
 
 
 MEMORY_EXTRACTION_PROMPT = """You are a MEMORY EXTRACTOR for a supply chain

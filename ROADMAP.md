@@ -90,10 +90,13 @@ the ones that don't apply at our scale.
 - **Files:** `agent/graph.py`, `app.py`, `tests/test_nodes.py`.
 - **Acceptance:** ✅ 8 new tests (marker parser across all marker shapes, informational-skip set, dedupe-by-node ordering, empty-input handling, history-walk newest-first, error-swallowing on missing checkpointer); 209/209 pass.
 
-### 9. Context-discipline audit
-- **Why:** `generate_response` currently receives every `*_context` blob regardless of router choice (modulo `_ctx_for`). Trim more aggressively per-intent.
-- **Scope:** Per-intent prompt assembly in `agent/prompts.py`; remove unused branches' contexts entirely (not just stub them).
-- **Files:** `agent/prompts.py`, `agent/nodes.py`.
+### 9. Context-discipline audit ✅
+- **Why:** `generate_response` previously emitted every `*_context` section in the system prompt, stubbing skipped branches with `"(not retrieved this turn…)"`. The Writer paid tokens for stub headers it could not use, and the prompt grew with every branch even when the router fanned out to one retriever only.
+- **Scope (shipped):**
+  1. `agent/prompts.py` splits the monolithic `SYSTEM_PROMPT` into `SYSTEM_PROMPT_BASE` (operating rules) + a per-branch section table keyed by `SYSTEM_PROMPT_BRANCH_ORDER = ("ltm", "episodes", "procedures", "rag", "kg")`, and exposes `build_system_prompt(branch_contexts)` which emits sections in canonical order, dropping any branch whose value is missing or whitespace-only.
+  2. `agent/nodes.py` replaces `_ctx_for` + `_SKIPPED_NOTE` with `_branch_contexts(state)`, which honors `plan.branches` (falling back to `routing.branches`) and additionally filters out empty payloads so the Writer never sees stub headers. `generate_response` calls `build_system_prompt(_branch_contexts(state))` — sections for skipped or empty branches are removed header-and-content.
+- **Files:** `agent/prompts.py`, `agent/nodes.py`, `tests/test_nodes.py`.
+- **Acceptance:** ✅ 9 new tests (per-branch inclusion / exclusion, whitespace-only drop, canonical ordering, base-only when empty, plan-over-routing precedence, no-routing fallback, end-to-end `generate_response` capture that asserts skipped-branch headers and payloads never reach the LLM); 218/218 pass.
 
 ## P3 — Deferred (not justified yet)
 
@@ -108,5 +111,6 @@ hybrid RAG, cross-provider fallback, self-correcting structured output,
 live-traffic drift detection, and the opt-in draft reviewer). P2.7 layered
 per-sentence citations on top without adding LLM calls or graph edges; P2.8
 extended LangGraph's existing HIL-resume primitive to in-place failure
-recovery (no new persistence, no new node). Remaining P2 work (#9) sharpens
-context discipline. P3 is on standby until product scope demands it.
+recovery (no new persistence, no new node). P2.9 finished the context-
+discipline audit by dropping skipped-branch sections entirely from the
+Writer prompt. P3 is on standby until product scope demands it.

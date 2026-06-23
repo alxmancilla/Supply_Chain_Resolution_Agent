@@ -185,6 +185,150 @@ def test_generate_response_skips_ttft_when_reply_is_empty(monkeypatch, context):
     assert "llm_ttft_ms" not in out.get("latency_ms", {})
 
 
+class _CapturingLLM:
+    """Non-streaming LLM that records the last prompt it received."""
+
+    def __init__(self, reply: str = "ok") -> None:
+        self._reply = reply
+        self.last_prompt = None
+
+    def invoke(self, prompt):
+        self.last_prompt = prompt
+        return AIMessage(content=self._reply)
+
+
+def _system_text_from(llm: _CapturingLLM) -> str:
+    from langchain_core.messages import SystemMessage
+
+    for msg in llm.last_prompt or []:
+        if isinstance(msg, SystemMessage):
+            content = msg.content
+            return content if isinstance(content, str) else str(content)
+    return ""
+
+
+def test_build_system_prompt_includes_only_supplied_branches():
+    from agent.prompts import SYSTEM_PROMPT_BASE, build_system_prompt
+
+    text = build_system_prompt({"rag": "chunk-text"})
+    assert text.startswith(SYSTEM_PROMPT_BASE)
+    assert "Retrieved knowledge corpus chunks" in text
+    assert "chunk-text" in text
+    for header in (
+        "Semantic memory",
+        "Episodic memory",
+        "Procedural memory",
+        "Structured facts",
+    ):
+        assert header not in text
+
+
+def test_build_system_prompt_drops_empty_and_whitespace_branches():
+    from agent.prompts import build_system_prompt
+
+    text = build_system_prompt({"rag": "  ", "kg": "fact-line"})
+    assert "Retrieved knowledge corpus chunks" not in text
+    assert "Structured facts" in text
+    assert "fact-line" in text
+
+
+def test_build_system_prompt_orders_sections_canonically():
+    from agent.prompts import build_system_prompt
+
+    text = build_system_prompt({
+        "kg": "k", "rag": "r", "procedures": "p", "episodes": "e", "ltm": "l",
+    })
+    order = [
+        text.index("Semantic memory"),
+        text.index("Episodic memory"),
+        text.index("Procedural memory"),
+        text.index("Retrieved knowledge corpus chunks"),
+        text.index("Structured facts"),
+    ]
+    assert order == sorted(order)
+
+
+def test_build_system_prompt_returns_base_only_when_no_sections():
+    from agent.prompts import SYSTEM_PROMPT_BASE, build_system_prompt
+
+    assert build_system_prompt({}) == SYSTEM_PROMPT_BASE
+    assert build_system_prompt({"ltm": "", "rag": "   "}) == SYSTEM_PROMPT_BASE
+
+
+def test_branch_contexts_filters_by_router_branches(context):
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "context": context,
+        "routing": {"intent_label": "recall_history", "branches": ["ltm", "episodes"]},
+        "ltm_context": "L",
+        "episodic_context": "E",
+        "procedural_context": "P",
+        "rag_context": "R",
+        "kg_context": "K",
+    }
+    out = nodes._branch_contexts(state)
+    assert set(out) == {"ltm", "episodes"}
+
+
+def test_branch_contexts_prefers_plan_branches_over_routing(context):
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "context": context,
+        "routing": {"intent_label": "recommend_shipment", "branches": list(nodes.ALL_BRANCHES)},
+        "plan": {"branches": ["rag", "kg"], "replan_count": 1},
+        "ltm_context": "L",
+        "rag_context": "R",
+        "kg_context": "K",
+    }
+    out = nodes._branch_contexts(state)
+    assert set(out) == {"rag", "kg"}
+
+
+def test_branch_contexts_drops_empty_payloads_even_when_branch_selected(context):
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "context": context,
+        "routing": {"intent_label": "recommend_shipment", "branches": list(nodes.ALL_BRANCHES)},
+        "rag_context": "chunk",
+        "kg_context": "   ",
+        "ltm_context": "",
+    }
+    out = nodes._branch_contexts(state)
+    assert out == {"rag": "chunk"}
+
+
+def test_branch_contexts_returns_all_populated_when_no_routing(context):
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "context": context,
+        "rag_context": "R",
+        "ltm_context": "L",
+    }
+    out = nodes._branch_contexts(state)
+    assert set(out) == {"ltm", "rag"}
+
+
+def test_generate_response_omits_skipped_branch_sections(monkeypatch, context):
+    llm = _CapturingLLM("ok")
+    monkeypatch.setattr(nodes, "get_llm", lambda: llm)
+    state = {
+        "messages": [HumanMessage(content="who do we prefer for TX-AZ?")],
+        "context": context,
+        "routing": {"intent_label": "recall_history", "branches": ["ltm"]},
+        "ltm_context": "User prefers Carrier A for TX-AZ.",
+        "rag_context": "should-not-leak-into-prompt",
+        "kg_context": "should-not-leak-either",
+    }
+    generate_response(state)
+    sys_text = _system_text_from(llm)
+    assert "Semantic memory" in sys_text
+    assert "User prefers Carrier A for TX-AZ." in sys_text
+    assert "Retrieved knowledge corpus chunks" not in sys_text
+    assert "Structured facts" not in sys_text
+    assert "should-not-leak-into-prompt" not in sys_text
+    assert "should-not-leak-either" not in sys_text
+
+
 def _citation_state(reply: str, *, rag=None, kg=None, context=None):
     state = {
         "messages": [HumanMessage(content="q"), AIMessage(content=reply)],

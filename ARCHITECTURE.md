@@ -161,11 +161,17 @@ flowchart TB
 2. **Fan out.** The selected retrievers run in parallel. Each one is
    timed (`@timed` opens an OTel span) and isolated by `@safe_retrieve`,
    so a single failure doesn't take the turn down.
-3. **Generate (streamed).** The chat provider is called with the system
-   prompt plus everything that was retrieved. Token deltas are pushed
-   to LangGraph's custom-channel `get_stream_writer` as they arrive; the
-   first non-empty delta records `llm_ttft_ms`. The Streamlit UI
-   renders the partial reply live.
+3. **Generate (streamed).** The chat provider is called with a system
+   prompt assembled by `build_system_prompt(_branch_contexts(state))`:
+   the operating-rules preamble is constant, then only the per-branch
+   sections (`ltm`, `episodes`, `procedures`, `rag`, `kg`) whose branch
+   was selected by `plan.branches` (or `routing.branches`) **and** whose
+   payload is non-empty are appended in canonical order. Skipped or
+   empty branches are dropped header-and-content so the Writer never
+   pays tokens for stubs. Token deltas are pushed to LangGraph's
+   custom-channel `get_stream_writer` as they arrive; the first
+   non-empty delta records `llm_ttft_ms`. The Streamlit UI renders the
+   partial reply live.
 4. **Validate citations.** `validate_citations` does two things in one
    pass, no extra LLM call: (a) scans the reply for any retrieved RAG
    `source` (or KG `source_doc`) and appends `"citations_missing"` to

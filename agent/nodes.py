@@ -90,7 +90,7 @@ from .prompts import (
     MEMORY_EXTRACTION_PROMPT,
     PROCEDURE_PROPOSAL_PROMPT,
     REFLECTION_PROMPT,
-    SYSTEM_PROMPT,
+    build_system_prompt,
 )
 
 RAG_TOP_K = 5
@@ -475,15 +475,40 @@ def reflect_on_evidence(state: AgentState) -> dict[str, Any]:
     return out
 
 
-_SKIPPED_NOTE = "(not retrieved this turn — intent router skipped this branch)"
+_BRANCH_TO_FIELD: tuple[tuple[str, str], ...] = (
+    ("ltm", "ltm_context"),
+    ("episodes", "episodic_context"),
+    ("procedures", "procedural_context"),
+    ("rag", "rag_context"),
+    ("kg", "kg_context"),
+)
 
 
-def _ctx_for(state: AgentState, branch: str, field: str) -> str:
+def _selected_branches(state: AgentState) -> set[str] | None:
     plan = state.get("plan") or {}
     branches = plan.get("branches") or (state.get("routing") or {}).get("branches")
-    if branches is not None and branch not in branches:
-        return _SKIPPED_NOTE
-    return state.get(field, "")
+    if branches is None:
+        return None
+    return set(branches)
+
+
+def _branch_contexts(state: AgentState) -> dict[str, str]:
+    """Collect per-branch context strings for the writer prompt.
+
+    Branches not chosen by the router (or `plan.branches`) are dropped
+    entirely; empty / whitespace-only payloads are also dropped so the
+    Writer never sees stub headers for content that does not exist.
+    Returns sections keyed by the names in `SYSTEM_PROMPT_BRANCH_ORDER`.
+    """
+    selected = _selected_branches(state)
+    out: dict[str, str] = {}
+    for branch, field in _BRANCH_TO_FIELD:
+        if selected is not None and branch not in selected:
+            continue
+        ctx = state.get(field, "")
+        if isinstance(ctx, str) and ctx.strip():
+            out[branch] = ctx
+    return out
 
 
 def _resolve_stream_writer():
@@ -509,15 +534,7 @@ def generate_response(state: AgentState) -> dict[str, Any]:
     on `{"node": "generate_response", ...}` and the Streamlit UI + smoke
     harness listen on that channel.
     """
-    system = SystemMessage(
-        content=SYSTEM_PROMPT.format(
-            ltm_context=_ctx_for(state, "ltm", "ltm_context"),
-            episodic_context=_ctx_for(state, "episodes", "episodic_context"),
-            procedural_context=_ctx_for(state, "procedures", "procedural_context"),
-            rag_context=_ctx_for(state, "rag", "rag_context"),
-            kg_context=_ctx_for(state, "kg", "kg_context"),
-        )
-    )
+    system = SystemMessage(content=build_system_prompt(_branch_contexts(state)))
     prompt: list[BaseMessage] = [system, *state["messages"]]
     writer = _resolve_stream_writer()
     llm = get_llm()
