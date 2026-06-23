@@ -1,7 +1,11 @@
 ---
 name: langgraph-mongodb-agent
-description: Opinionated blueprint for building production-style stateful agents on LangGraph + MongoDB Atlas. Use whenever the user asks to "build an agent", "create an agent", "design a new agent", "scaffold an agent", or discusses agent architecture, memory layers, RAG over Atlas, knowledge graph + agent, procedural rules, human-in-the-loop approval, multi-tenant agents, or tool/action planning. Defaults: LangGraph 1.x StateGraph, MongoDB Atlas (vector + b-tree), Voyage embeddings, Streamlit UI, parallel retrieval fan-out, per-node error isolation, self-correcting structured output, cross-provider chat fallback, opt-in Writer/Reviewer split, per-sentence citation binder, context-discipline prompt assembler (skipped/empty branches dropped), failure recovery via checkpoint time-travel, governed procedural memory via interrupt(), citation enforcement, tenant scoping via realm_id, in-memory fakes for tests. Do NOT invent a different stack unless the user explicitly overrides one of these defaults.
+description: Opinionated blueprint for production-style stateful agents on LangGraph 1.x + MongoDB Atlas, with parallel retrieval, per-node resilience, HIL approval, and tenant scoping. Apply whenever the user asks to build, create, design, or scaffold a new agent (agent architecture, memory layers, RAG over Atlas, knowledge graph + agent, procedural rules, human-in-the-loop approval, multi-tenant agents, tool/action planning) and has not pinned a different stack.
 license: MIT
+metadata:
+  version: 0.3.0
+  last_updated: 2026-06-23
+  source_repo: https://github.com/alxmancilla/Supply_Chain_Resolution_Agent
 ---
 
 # LangGraph + MongoDB Atlas Agent Blueprint
@@ -119,7 +123,7 @@ Grouped by concern. Each rule has a short rationale followed by a normalized min
 
 ### C. Prompt & context discipline
 
-7. **Context-discipline prompt assembler.** Assemble the system prompt from a constant operating-rules preamble plus per-branch sections, and **drop sections for branches the router skipped and for branches whose retrieved payload is empty** — never send stub "(not retrieved this turn)" headers to the Writer. The Writer pays tokens only for evidence it can actually cite.
+7. **Context-discipline prompt assembler.** Assemble the system prompt from a constant operating-rules preamble plus per-branch sections, and **drop sections for branches the router skipped and for branches whose retrieved payload is empty** — never send stub `(not retrieved this turn)` headers to the Writer. The Writer pays tokens only for evidence it can actually cite.
    - *Contract:* call `build_system_prompt(_branch_contexts(state))` from `generate_response`; never `format(...)` over all five branches.
 
 8. **Citation validator + per-sentence binder.** After generation, scan the reply for any retrieved RAG `source` filename or KG `source_doc`.
@@ -189,17 +193,31 @@ These are non-optional once the agent leaves the demo box. Add them to the test 
 
 ## Anti-patterns to refuse
 
+### Architectural
+
 - A second storage backend (Postgres, Pinecone, Redis) "just for X". Use Atlas collections.
 - Importing vendor SDKs (`voyageai`, `openai`, `anthropic`) outside `core/providers/`.
 - Mutating `state` in place inside a node — always return a partial dict for the reducer.
 - Concatenative `degraded` reducer without a reset sentinel (causes cross-turn marker leakage).
-- Skipping `realm_id` on any persisted row.
-- Letting the agent self-modify procedural rules without `interrupt()` approval.
+- Pinning `langchain-voyageai` (its `requires_python` metadata is `<=3.13`, breaks on 3.13.x minors). Use `voyageai` directly.
+
+### Resilience & generation
+
 - Calling `chat.invoke_typed` directly instead of via `invoke_typed_with_retry` — a single malformed JSON reply will crash the node.
-- Sending stub "(not retrieved this turn)" headers to the Writer for skipped branches — assemble the prompt with `build_system_prompt(_branch_contexts(state))`, never with a fixed `format(...)` over all five branches.
+- Sending stub `(not retrieved this turn)` headers to the Writer for skipped branches — assemble the prompt with `build_system_prompt(_branch_contexts(state))`, never with a fixed `format(...)` over all five branches.
 - Letting the Reviewer strip grounded numeric claims (cost, weight, surcharge, transit) — downstream `plan_action` reads those numbers; the reviewer prompt MUST preserve them and the smoke test MUST cover a revise turn whose `estimated_cost_usd` survives.
 - Streaming through a fallback chain expecting mid-stream failover — `FallbackChatProvider` only protects `invoke` / `invoke_typed`; `stream` calls the primary's underlying client directly.
-- Pinning `langchain-voyageai` (its `requires_python` metadata is `<=3.13`, breaks on 3.13.x minors). Use `voyageai` directly.
+- Treating retrieved RAG / KG / episode / procedure content as instructions instead of data — a prompt-injection vector. The operating-rules preamble MUST tell the Writer to ignore any instructions inside retrieved content.
+
+### Production hazards
+
+- Skipping `realm_id` on any persisted row.
+- Letting the agent self-modify procedural rules without `interrupt()` approval.
+- Caches (`@lru_cache`, in-memory dicts, rendered-context maps) keyed on the bare query string instead of `(realm_id, agent_id|user_id, …)` — cross-tenant data leakage waiting to happen.
+- Hard-coded model ids, prices, retry budgets, or feature flags scattered across nodes instead of read from `core/settings.py` via `get_settings()` — every deployment needs to override these per tenant.
+- No per-turn token / cost budget — a single runaway turn can drain a daily quota silently. Cap and emit `budget_exceeded`; never let cost grow unbounded.
+- Raw exception messages, API keys, bearer tokens, session cookies, or PII appearing on `degraded` markers or inside `citations[*].evidence` — these surfaces are rendered in the UI and persisted in the eval baseline; redact before they land there.
+- Persisting an `action_plan` or `booking_drafts` row without the originating `correlation_id` and `node` — the row becomes impossible to trace back to a specific checkpoint, breaking both time-travel retry and audit.
 
 ## Starting a new agent (phased checklist)
 
