@@ -741,83 +741,119 @@ def _extract_cost_fallback(text: str) -> float | None:
     return None
 
 
-@timed("plan_ms")
-def plan_action(state: AgentState) -> dict[str, Any]:
-    """Extract a structured action proposal from the agent reply.
-
-    Two action types share this node:
-    - `propose_procedure` when the router classified the turn as a request to
-      add a new operating rule (extracted via `PROCEDURE_PROPOSAL_PROMPT`).
-    - `create_booking_draft` for shipment recommendations (the default path).
-    """
-    messages = state["messages"]
+def _last_user_and_agent_text(messages: list[BaseMessage]) -> tuple[str, str]:
+    """Return the most recent user prompt and agent reply as plain strings."""
     user_text = _last_user_text(messages)
     agent_text = ""
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
             agent_text = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
+    return user_text, agent_text
+
+
+def _finalize_plan_out(
+    out: dict[str, Any],
+    *,
+    chat: Any,
+    settings: Any,
+    node: str,
+    structured_failed: bool,
+) -> dict[str, Any]:
+    """Attach usage, retry / failure markers, and chat-fallback marker to `out`."""
+    usage = getattr(chat, "last_usage", None)
+    if usage:
+        out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], settings)
+    _record_structured_retry(chat, out, node=node)
+    if structured_failed:
+        _append_marker(out, f"structured_failed:{node}")
+    _record_chat_fallback(chat, out)
+    return out
+
+
+@timed("plan_ms")
+def plan_booking(state: AgentState) -> dict[str, Any]:
+    """Extract a `create_booking_draft` action plan from a shipment reply.
+
+    Wired to the graph only for actionable, non-procedural intents
+    (`recommend_shipment`, `fallback`). Skipped entirely when the router
+    classified the turn as non-actionable or as a procedure proposal.
+    """
+    user_text, agent_text = _last_user_and_agent_text(state["messages"])
     if not (user_text and agent_text):
         return {"action_plan": dict(_NO_ACTION)}
     chat = get_chat_provider()
     settings = get_settings()
-    routing = state.get("routing") or {}
+    prompt = ACTION_PLANNING_PROMPT.format(
+        user_message=user_text, agent_message=agent_text
+    )
     structured_failed = False
-    if routing.get("intent_label") == "propose_procedure":
-        prompt = PROCEDURE_PROPOSAL_PROMPT.format(
-            user_message=user_text, agent_message=agent_text
+    try:
+        booking = invoke_typed_with_retry(
+            chat, prompt, BookingProposal,
+            max_attempts=settings.structured_retry_max_attempts,
         )
-        try:
-            proposal = invoke_typed_with_retry(
-                chat, prompt, ProcedureProposal,
-                max_attempts=settings.structured_retry_max_attempts,
-            )
-        except ValueError:
-            out: dict[str, Any] = {"action_plan": dict(_NO_ACTION)}
-            structured_failed = True
-        else:
-            assert isinstance(proposal, ProcedureProposal)
-            if proposal.action_type != "propose_procedure" or not proposal.rule.strip():
-                out = {"action_plan": dict(_NO_ACTION)}
-            else:
-                out = {"action_plan": proposal.model_dump()}
+    except ValueError:
+        out: dict[str, Any] = {"action_plan": dict(_NO_ACTION)}
+        structured_failed = True
     else:
-        prompt = ACTION_PLANNING_PROMPT.format(
-            user_message=user_text, agent_message=agent_text
+        assert isinstance(booking, BookingProposal)
+        cost_fallback_used = False
+        if booking.action_type == "create_booking_draft" and not booking.estimated_cost_usd:
+            fallback_cost = _extract_cost_fallback(agent_text)
+            if fallback_cost is None:
+                fallback_cost = _extract_cost_fallback(state.get("rag_context") or "")
+            if fallback_cost is not None:
+                booking = booking.model_copy(update={"estimated_cost_usd": fallback_cost})
+                cost_fallback_used = True
+        if booking.requires_approval is False and "[REQUIRES HUMAN APPROVAL]" in agent_text:
+            booking = booking.model_copy(update={"requires_approval": True})
+        if booking.requires_approval is False and (booking.estimated_cost_usd or 0) > 10000:
+            booking = booking.model_copy(update={"requires_approval": True})
+        out = {"action_plan": booking.model_dump()}
+        if cost_fallback_used:
+            _append_marker(out, "cost_extracted_via_fallback")
+    return _finalize_plan_out(
+        out, chat=chat, settings=settings,
+        node="plan_booking", structured_failed=structured_failed,
+    )
+
+
+@timed("plan_ms")
+def plan_procedure(state: AgentState) -> dict[str, Any]:
+    """Extract a `propose_procedure` action plan from a rule-adding reply.
+
+    Wired to the graph only when the router classified the intent as
+    `propose_procedure`. Drops empty proposals to `{"action_type": "none"}`
+    so `execute_action` becomes a no-op.
+    """
+    user_text, agent_text = _last_user_and_agent_text(state["messages"])
+    if not (user_text and agent_text):
+        return {"action_plan": dict(_NO_ACTION)}
+    chat = get_chat_provider()
+    settings = get_settings()
+    prompt = PROCEDURE_PROPOSAL_PROMPT.format(
+        user_message=user_text, agent_message=agent_text
+    )
+    structured_failed = False
+    try:
+        proposal = invoke_typed_with_retry(
+            chat, prompt, ProcedureProposal,
+            max_attempts=settings.structured_retry_max_attempts,
         )
-        try:
-            booking = invoke_typed_with_retry(
-                chat, prompt, BookingProposal,
-                max_attempts=settings.structured_retry_max_attempts,
-            )
-        except ValueError:
+    except ValueError:
+        out: dict[str, Any] = {"action_plan": dict(_NO_ACTION)}
+        structured_failed = True
+    else:
+        assert isinstance(proposal, ProcedureProposal)
+        if proposal.action_type != "propose_procedure" or not proposal.rule.strip():
             out = {"action_plan": dict(_NO_ACTION)}
-            structured_failed = True
         else:
-            assert isinstance(booking, BookingProposal)
-            cost_fallback_used = False
-            if booking.action_type == "create_booking_draft" and not booking.estimated_cost_usd:
-                fallback_cost = _extract_cost_fallback(agent_text)
-                if fallback_cost is None:
-                    fallback_cost = _extract_cost_fallback(state.get("rag_context") or "")
-                if fallback_cost is not None:
-                    booking = booking.model_copy(update={"estimated_cost_usd": fallback_cost})
-                    cost_fallback_used = True
-            if booking.requires_approval is False and "[REQUIRES HUMAN APPROVAL]" in agent_text:
-                booking = booking.model_copy(update={"requires_approval": True})
-            if booking.requires_approval is False and (booking.estimated_cost_usd or 0) > 10000:
-                booking = booking.model_copy(update={"requires_approval": True})
-            out = {"action_plan": booking.model_dump()}
-            if cost_fallback_used:
-                _append_marker(out, "cost_extracted_via_fallback")
-    usage = getattr(chat, "last_usage", None)
-    if usage:
-        out["usage"] = usage_payload(usage["input_tokens"], usage["output_tokens"], settings)
-    _record_structured_retry(chat, out, node="plan_action")
-    if structured_failed:
-        _append_marker(out, "structured_failed:plan_action")
-    _record_chat_fallback(chat, out)
-    return out
+            out = {"action_plan": proposal.model_dump()}
+    return _finalize_plan_out(
+        out, chat=chat, settings=settings,
+        node="plan_procedure", structured_failed=structured_failed,
+    )
 
 
 def _draft_id_for(ctx, plan: dict[str, Any]) -> str:
@@ -1050,7 +1086,8 @@ __all__ = [
     "retrieve_kg",
     "generate_response",
     "validate_citations",
-    "plan_action",
+    "plan_booking",
+    "plan_procedure",
     "execute_action",
     "save_memory",
     "EMBEDDING_DIMS",

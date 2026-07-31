@@ -3,9 +3,10 @@
 Topology — an intent router narrows a five-way retrieval fan-out per turn,
 a Think & Plan step refines the per-turn retrieval plan, retrievers run in
 parallel, and a Reflection Agent decides whether the evidence is sufficient
-or whether one rescue retrieval pass should run before answering. The
-planning + execution stage then proposes and (with human approval) commits
-a booking draft before persisting memory:
+or whether one rescue retrieval pass should run before answering. After
+citation validation, a per-intent router picks the action-planning branch
+(booking, procedure proposal, or skip) before executing and persisting
+memory:
 
     START -> classify_intent -> think_and_plan ─┬─> retrieve_ltm ────────┐
                                                 ├─> retrieve_episodes ───┤
@@ -14,7 +15,9 @@ a booking draft before persisting memory:
                                                 └─> retrieve_kg ─────────┘
               -> {think_and_plan (loop, capped) | generate_response}
               -> {review_draft (opt-in) | validate_citations}
-              -> validate_citations -> plan_action -> execute_action
+              -> validate_citations ─┬─> plan_booking ───┐
+                                     ├─> plan_procedure ─┼─> execute_action -> save_memory
+                                     └─> save_memory ────┘  (non-actionable skip)
               -> save_memory -> END
 """
 from __future__ import annotations
@@ -34,7 +37,8 @@ from .nodes import (
     classify_intent,
     execute_action,
     generate_response,
-    plan_action,
+    plan_booking,
+    plan_procedure,
     reflect_on_evidence,
     retrieve_episodes,
     retrieve_kg,
@@ -46,6 +50,18 @@ from .nodes import (
     think_and_plan,
     validate_citations,
 )
+
+
+# Intents where the answer is informational and no downstream draft or
+# proposal ever gets staged — routing past `plan_*` saves an LLM call and
+# the associated latency budget.
+_NON_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
+    "recall_preference",
+    "recall_episode",
+    "lookup_policy",
+    "structured_lookup",
+    "list_rules",
+})
 
 
 _BRANCH_TO_NODE = {
@@ -79,6 +95,22 @@ def _route_after_writer(_state: AgentState) -> str:
     return "validate_citations"
 
 
+def _route_after_citations(state: AgentState) -> str:
+    """Pick the action-planning branch (or skip it) based on router intent.
+
+    Non-actionable intents jump straight to `save_memory`, skipping the
+    action-planning LLM call and `execute_action` entirely. Procedure
+    proposals go to `plan_procedure`; everything else (recommend_shipment,
+    fallback, unknown) goes to `plan_booking`.
+    """
+    intent = (state.get("routing") or {}).get("intent_label") or "fallback"
+    if intent in _NON_ACTIONABLE_INTENTS:
+        return "save_memory"
+    if intent == "propose_procedure":
+        return "plan_procedure"
+    return "plan_booking"
+
+
 def build_graph():
     builder = StateGraph(AgentState)
     builder.add_node("classify_intent", classify_intent)
@@ -92,7 +124,8 @@ def build_graph():
     builder.add_node("generate_response", generate_response)
     builder.add_node("review_draft", review_draft)
     builder.add_node("validate_citations", validate_citations)
-    builder.add_node("plan_action", plan_action)
+    builder.add_node("plan_booking", plan_booking)
+    builder.add_node("plan_procedure", plan_procedure)
     builder.add_node("execute_action", execute_action)
     builder.add_node("save_memory", save_memory)
 
@@ -116,8 +149,13 @@ def build_graph():
         ["review_draft", "validate_citations"],
     )
     builder.add_edge("review_draft", "validate_citations")
-    builder.add_edge("validate_citations", "plan_action")
-    builder.add_edge("plan_action", "execute_action")
+    builder.add_conditional_edges(
+        "validate_citations",
+        _route_after_citations,
+        ["plan_booking", "plan_procedure", "save_memory"],
+    )
+    builder.add_edge("plan_booking", "execute_action")
+    builder.add_edge("plan_procedure", "execute_action")
     builder.add_edge("execute_action", "save_memory")
     builder.add_edge("save_memory", END)
 

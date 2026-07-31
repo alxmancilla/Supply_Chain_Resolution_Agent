@@ -6,7 +6,7 @@ from dataclasses import replace
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent import nodes
-from agent.nodes import generate_response, plan_action, save_memory
+from agent.nodes import generate_response, plan_booking, save_memory
 from core.schemas import BookingProposal, MemoryExtraction
 from core.settings import get_settings
 from core.usage import (
@@ -97,7 +97,7 @@ def test_generate_response_emits_usage_from_streamed_chunks(monkeypatch, context
     assert out["usage"]["calls"] == 1.0
 
 
-def test_plan_action_emits_usage_from_chat_provider(monkeypatch, context):
+def test_plan_booking_emits_usage_from_chat_provider(monkeypatch, context):
     chat = FakeChatProvider(
         reply='{"action_type": "none"}',
         usage={"input_tokens": 30, "output_tokens": 5},
@@ -107,7 +107,7 @@ def test_plan_action_emits_usage_from_chat_provider(monkeypatch, context):
         "messages": [HumanMessage(content="ship 1000lbs"), AIMessage(content="recommend Carrier A")],
         "context": context,
     }
-    out = plan_action(state)
+    out = plan_booking(state)
     assert out["action_plan"]["action_type"] == "none"
     assert out["usage"]["tokens_in"] == 30.0
     assert out["usage"]["tokens_out"] == 5.0

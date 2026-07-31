@@ -4,7 +4,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage
 
 from agent import nodes
-from agent.graph import _route_to_retrievers
+from agent.graph import _NON_ACTIONABLE_INTENTS, _route_after_citations, _route_to_retrievers
 from agent.nodes import classify_intent
 from core.router import ChainedIntentRouter, HeuristicIntentRouter, LLMIntentRouter
 from core.schemas import ALL_BRANCHES, RoutingDecision
@@ -188,3 +188,38 @@ def test_chained_router_falls_through_to_llm():
     d = chained.route("just a vague question without keywords")
     assert d.intent_label == "fallback"
     assert d.branches == ["ltm"]
+
+
+# --- P2 #10: conditional routing after validate_citations ------------------
+
+
+def test_route_after_citations_skips_planning_for_non_actionable_intents():
+    for intent in _NON_ACTIONABLE_INTENTS:
+        state = {"routing": {"intent_label": intent}}
+        assert _route_after_citations(state) == "save_memory", intent
+
+
+def test_route_after_citations_picks_procedure_branch_for_propose_procedure():
+    state = {"routing": {"intent_label": "propose_procedure"}}
+    assert _route_after_citations(state) == "plan_procedure"
+
+
+def test_route_after_citations_picks_booking_branch_for_actionable_intents():
+    for intent in ("recommend_shipment", "fallback"):
+        state = {"routing": {"intent_label": intent}}
+        assert _route_after_citations(state) == "plan_booking", intent
+
+
+def test_route_after_citations_defaults_to_booking_when_routing_missing():
+    assert _route_after_citations({}) == "plan_booking"
+    assert _route_after_citations({"routing": {}}) == "plan_booking"
+
+
+def test_non_actionable_intents_cover_expected_labels():
+    assert _NON_ACTIONABLE_INTENTS == frozenset({
+        "recall_preference",
+        "recall_episode",
+        "lookup_policy",
+        "structured_lookup",
+        "list_rules",
+    })

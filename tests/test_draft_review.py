@@ -137,7 +137,7 @@ def test_route_after_writer_branches_on_flag(monkeypatch):
 
 def test_review_draft_prompt_preserves_grounded_numbers(monkeypatch, context):
     """Reviewer prompt must include grounded numbers from the evidence and
-    instruct the LLM to preserve them; downstream `plan_action` extracts
+    instruct the LLM to preserve them; downstream `plan_booking` extracts
     `estimated_cost_usd` from the draft and breaks when numbers are dropped.
     """
     payload = json.dumps({"needs_revision": False, "revised_reply": None, "reasons": ["numeric claims grounded"]})

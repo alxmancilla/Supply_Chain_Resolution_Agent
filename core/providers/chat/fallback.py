@@ -95,8 +95,9 @@ class FallbackChatProvider:
         """Forward to the primary's raw client (used by `generate_response.stream`).
 
         Streaming bypasses the fallback chain by design: switching mid-stream
-        is not supported. Reflection, plan_action, and memory extraction all
-        go through `invoke` / `invoke_typed` and therefore *are* covered.
+        is not supported. Reflection, action planning (plan_booking /
+        plan_procedure), and memory extraction all go through `invoke` /
+        `invoke_typed` and therefore *are* covered.
         """
         prov = self._providers[0][1]
         underlying = getattr(prov, "underlying", None)

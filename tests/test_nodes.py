@@ -11,7 +11,8 @@ from agent import nodes
 from agent.nodes import (
     execute_action,
     generate_response,
-    plan_action,
+    plan_booking,
+    plan_procedure,
     reflect_on_evidence,
     retrieve_episodes,
     retrieve_ltm,
@@ -501,12 +502,12 @@ def _propose_state(context, *, user="going forward, always prefer Carrier A on T
     }
 
 
-def test_plan_action_uses_procedure_prompt_when_routing_proposes(monkeypatch, context):
+def test_plan_procedure_uses_procedure_prompt(monkeypatch, context):
     chat = FakeChatProvider(
         reply='{"action_type": "propose_procedure", "rule": "Always prefer Carrier A on TX-AZ.", "category": "policy", "rationale": "user preference"}'
     )
     monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
-    out = plan_action(_propose_state(context))
+    out = plan_procedure(_propose_state(context))
     assert out["action_plan"]["action_type"] == "propose_procedure"
     assert out["action_plan"]["rule"] == "Always prefer Carrier A on TX-AZ."
     assert out["action_plan"]["category"] == "policy"
@@ -514,14 +515,14 @@ def test_plan_action_uses_procedure_prompt_when_routing_proposes(monkeypatch, co
     assert "PROCEDURE EXTRACTOR" in chat.calls[0]
 
 
-def test_plan_action_drops_empty_procedure_proposal(monkeypatch, context):
+def test_plan_procedure_drops_empty_proposal(monkeypatch, context):
     chat = FakeChatProvider(reply='{"action_type": "propose_procedure", "rule": "", "category": "general", "rationale": ""}')
     monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
-    out = plan_action(_propose_state(context))
+    out = plan_procedure(_propose_state(context))
     assert out["action_plan"] == {"action_type": "none"}
 
 
-def test_plan_action_keeps_booking_path_when_intent_not_propose(monkeypatch, context):
+def test_plan_booking_uses_action_planner_prompt(monkeypatch, context):
     chat = FakeChatProvider(
         reply='{"action_type": "create_booking_draft", "carrier": "A", "lane": "TX-AZ", "weight_lb": 1000, "estimated_cost_usd": 500, "requires_approval": false, "rationale": "r"}'
     )
@@ -531,7 +532,7 @@ def test_plan_action_keeps_booking_path_when_intent_not_propose(monkeypatch, con
         "context": context,
         "routing": {"intent_label": "recommend_shipment", "branches": list(nodes.ALL_BRANCHES)},
     }
-    out = plan_action(state)
+    out = plan_booking(state)
     assert out["action_plan"]["action_type"] == "create_booking_draft"
     assert out["action_plan"]["carrier"] == "A"
     assert "ACTION PLANNER" in chat.calls[0]
@@ -546,7 +547,7 @@ def _booking_state(context, *, agent_text: str, rag_context: str = ""):
     }
 
 
-def test_plan_action_cost_fallback_takes_range_upper_bound(monkeypatch, context):
+def test_plan_booking_cost_fallback_takes_range_upper_bound(monkeypatch, context):
     """When the LLM omits estimated_cost_usd, the regex fallback picks the
     upper bound of the first '$X-$Y' range found in the agent reply.
     """
@@ -555,13 +556,13 @@ def test_plan_action_cost_fallback_takes_range_upper_bound(monkeypatch, context)
     )
     monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
     agent_text = "Typical 15,000 lb dry-van quote is $410–$475 all-in. $475 < $10,000."
-    out = plan_action(_booking_state(context, agent_text=agent_text))
+    out = plan_booking(_booking_state(context, agent_text=agent_text))
     assert out["action_plan"]["estimated_cost_usd"] == 475.0
     assert out["action_plan"]["requires_approval"] is False
     assert "cost_extracted_via_fallback" in out.get("degraded", [])
 
 
-def test_plan_action_cost_fallback_does_not_override_llm_value(monkeypatch, context):
+def test_plan_booking_cost_fallback_does_not_override_llm_value(monkeypatch, context):
     """A planner-supplied cost must not be touched by the regex fallback,
     even when the agent reply also contains a different '$X' literal.
     """
@@ -569,12 +570,12 @@ def test_plan_action_cost_fallback_does_not_override_llm_value(monkeypatch, cont
         reply='{"action_type": "create_booking_draft", "carrier": "A", "lane": "Austin-Dallas", "weight_lb": 15000, "estimated_cost_usd": 500, "requires_approval": false, "rationale": "r"}'
     )
     monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
-    out = plan_action(_booking_state(context, agent_text="Quote $410-$475 typical."))
+    out = plan_booking(_booking_state(context, agent_text="Quote $410-$475 typical."))
     assert out["action_plan"]["estimated_cost_usd"] == 500
     assert "cost_extracted_via_fallback" not in out.get("degraded", [])
 
 
-def test_plan_action_flips_approval_when_fallback_cost_above_threshold(monkeypatch, context):
+def test_plan_booking_flips_approval_when_fallback_cost_above_threshold(monkeypatch, context):
     """When the regex fallback yields a cost above $10k, requires_approval
     must flip True even though the LLM returned False.
     """
@@ -582,7 +583,7 @@ def test_plan_action_flips_approval_when_fallback_cost_above_threshold(monkeypat
         reply='{"action_type": "create_booking_draft", "carrier": "A", "lane": "TX-CA", "weight_lb": 30000, "estimated_cost_usd": null, "requires_approval": false, "rationale": "r"}'
     )
     monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
-    out = plan_action(_booking_state(context, agent_text="Estimated all-in $12,500 for this lane."))
+    out = plan_booking(_booking_state(context, agent_text="Estimated all-in $12,500 for this lane."))
     assert out["action_plan"]["estimated_cost_usd"] == 12500.0
     assert out["action_plan"]["requires_approval"] is True
 
@@ -603,7 +604,7 @@ def test_extract_cost_fallback_helper_variants():
     assert f("$0 surcharge under threshold.") is None
 
 
-def test_plan_action_cost_fallback_fires_when_llm_returns_zero(monkeypatch, context):
+def test_plan_booking_cost_fallback_fires_when_llm_returns_zero(monkeypatch, context):
     """The action planner sometimes returns estimated_cost_usd=0 (a meaningless
     value for a booking); the fallback must engage just like for None.
     """
@@ -612,12 +613,12 @@ def test_plan_action_cost_fallback_fires_when_llm_returns_zero(monkeypatch, cont
     )
     monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
     agent_text = "Typical 15,000 lb dry-van quote $410-$475 all-in."
-    out = plan_action(_booking_state(context, agent_text=agent_text))
+    out = plan_booking(_booking_state(context, agent_text=agent_text))
     assert out["action_plan"]["estimated_cost_usd"] == 475.0
     assert "cost_extracted_via_fallback" in out.get("degraded", [])
 
 
-def test_plan_action_cost_fallback_uses_rag_context_when_agent_text_lacks_price(monkeypatch, context):
+def test_plan_booking_cost_fallback_uses_rag_context_when_agent_text_lacks_price(monkeypatch, context):
     """When the reviewer strips the cost line from the visible reply, the
     fallback scans the retrieved RAG context (the source of truth) so the
     booking_draft still captures the right estimated_cost_usd.
@@ -628,7 +629,7 @@ def test_plan_action_cost_fallback_uses_rag_context_when_agent_text_lacks_price(
     monkeypatch.setattr(nodes, "get_chat_provider", lambda: chat)
     agent_text = "Book Carrier A dry van. 99.1% on-time. 0.0 surcharge under 20,000 lb."
     rag_context = "[austin_dallas_hot_lane.pdf] Typical 15,000 lb dry-van all-in quote is $410-$475."
-    out = plan_action(_booking_state(context, agent_text=agent_text, rag_context=rag_context))
+    out = plan_booking(_booking_state(context, agent_text=agent_text, rag_context=rag_context))
     assert out["action_plan"]["estimated_cost_usd"] == 475.0
     assert "cost_extracted_via_fallback" in out.get("degraded", [])
 
@@ -1147,7 +1148,8 @@ def test_citations_match_uses_kg_facts():
 def test_parse_failure_marker_recognises_structured_failed():
     from agent.graph import parse_failure_marker
 
-    assert parse_failure_marker("structured_failed:plan_action") == "plan_action"
+    assert parse_failure_marker("structured_failed:plan_booking") == "plan_booking"
+    assert parse_failure_marker("structured_failed:plan_procedure") == "plan_procedure"
     assert parse_failure_marker("structured_failed:reflect_on_evidence") == "reflect_on_evidence"
     assert parse_failure_marker("structured_failed:save_memory") == "save_memory"
     assert parse_failure_marker("structured_failed:review_draft") == "review_draft"
@@ -1172,7 +1174,7 @@ def test_parse_failure_marker_skips_informational_markers():
 
     for marker in (
         "chat_fallback:openai",
-        "structured_retry:plan_action",
+        "structured_retry:plan_booking",
         "cost_extracted_via_fallback",
         "citations_missing",
         "evidence_insufficient",
@@ -1190,14 +1192,14 @@ def test_retryable_failures_dedupes_by_node_and_preserves_order():
 
     out = retryable_failures([
         "chat_fallback:openai",
-        "structured_failed:plan_action",
+        "structured_failed:plan_booking",
         "retrieve_rag: TimeoutError: x",
-        "structured_failed:plan_action",  # dup → collapsed
+        "structured_failed:plan_booking",  # dup → collapsed
         "reflection_failed",
         "citations_missing",
     ])
     assert out == [
-        ("structured_failed:plan_action", "plan_action"),
+        ("structured_failed:plan_booking", "plan_booking"),
         ("retrieve_rag: TimeoutError: x", "retrieve_rag"),
         ("reflection_failed", "save_memory"),
     ]
@@ -1227,14 +1229,14 @@ def test_find_retry_checkpoint_walks_history_newest_first():
 
     history = [
         _Snap(("save_memory",), "ck-3"),
-        _Snap(("plan_action",), "ck-2-newest-plan"),
-        _Snap(("plan_action",), "ck-2-older-plan"),
+        _Snap(("plan_booking",), "ck-2-newest-plan"),
+        _Snap(("plan_booking",), "ck-2-older-plan"),
         _Snap(("retrieve_rag",), "ck-1"),
     ]
     graph = _FakeGraph(history)
     config = {"configurable": {"thread_id": "t1"}}
 
-    cfg = find_retry_checkpoint(graph, config, "plan_action")
+    cfg = find_retry_checkpoint(graph, config, "plan_booking")
     assert cfg == {"configurable": {"checkpoint_id": "ck-2-newest-plan"}}
     cfg = find_retry_checkpoint(graph, config, "retrieve_rag")
     assert cfg == {"configurable": {"checkpoint_id": "ck-1"}}
@@ -1248,4 +1250,4 @@ def test_find_retry_checkpoint_swallows_history_errors():
         def get_state_history(self, _config):
             raise RuntimeError("checkpointer offline")
 
-    assert find_retry_checkpoint(_BoomGraph(), {"configurable": {}}, "plan_action") is None
+    assert find_retry_checkpoint(_BoomGraph(), {"configurable": {}}, "plan_booking") is None

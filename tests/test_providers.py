@@ -434,8 +434,8 @@ def test_invoke_typed_with_retry_forwards_through_fallback_chain():
     assert chain.last_fallback == "openai"
 
 
-def test_plan_action_emits_structured_retry_marker_when_retried(monkeypatch):
-    """Acceptance: plan_action surfaces structured_retry:<node> in degraded."""
+def test_plan_booking_emits_structured_retry_marker_when_retried(monkeypatch):
+    """Acceptance: plan_booking surfaces structured_retry:<node> in degraded."""
     from langchain_core.messages import AIMessage, HumanMessage
 
     from agent import nodes
@@ -460,12 +460,12 @@ def test_plan_action_emits_structured_retry_marker_when_retried(monkeypatch):
         "context": AgentContext(realm_id="r", user_id="u", agent_id="a"),
         "routing": {"intent_label": "recommend_shipment", "branches": ["rag"]},
     }
-    out = nodes.plan_action(state)
+    out = nodes.plan_booking(state)
     assert out["action_plan"]["action_type"] == "create_booking_draft"
-    assert "structured_retry:plan_action" in out["degraded"]
+    assert "structured_retry:plan_booking" in out["degraded"]
 
 
-def test_plan_action_emits_structured_failed_marker_when_exhausted(monkeypatch):
+def test_plan_booking_emits_structured_failed_marker_when_exhausted(monkeypatch):
     """Acceptance: exhausted retry budget degrades cleanly without crashing."""
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -486,9 +486,9 @@ def test_plan_action_emits_structured_failed_marker_when_exhausted(monkeypatch):
         "context": AgentContext(realm_id="r", user_id="u", agent_id="a"),
         "routing": {"intent_label": "recommend_shipment", "branches": ["rag"]},
     }
-    out = nodes.plan_action(state)
+    out = nodes.plan_booking(state)
     assert out["action_plan"] == {"action_type": "none"}
-    assert "structured_failed:plan_action" in out["degraded"]
+    assert "structured_failed:plan_booking" in out["degraded"]
 
 
 def test_timed_decorator_records_latency_and_opens_span_safely():
