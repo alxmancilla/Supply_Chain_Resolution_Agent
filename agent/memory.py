@@ -13,6 +13,7 @@ import os
 from functools import lru_cache
 
 from langgraph.checkpoint.mongodb import MongoDBSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.store.mongodb import MongoDBStore, create_vector_index_config
 from pymongo import MongoClient
 
@@ -67,6 +68,9 @@ def get_embeddings():
 
 
 EMBEDDING_DIMS = 1024
+_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, str], ...] = (
+    ("core.settings", "AgentContext"),
+)
 
 
 def _embedding_dims() -> int:
@@ -107,11 +111,14 @@ def _assert_vector_index_dims(collection, index_name: str, expected_dims: int) -
 
 @lru_cache(maxsize=1)
 def get_checkpointer() -> MongoDBSaver:
-    """Short-term memory: `MongoDBSaver` wired into the compiled LangGraph."""
+    """Short-term memory: `MongoDBSaver` with an explicit state-type allowlist."""
     return MongoDBSaver(
         client=get_mongo_client(),
         db_name=DB_NAME,
         checkpoint_collection_name=CHECKPOINTS_COLLECTION,
+        serde=JsonPlusSerializer(
+            allowed_msgpack_modules=_CHECKPOINT_MSGPACK_ALLOWLIST,
+        ),
     )
 
 
