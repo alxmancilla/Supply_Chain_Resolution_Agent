@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from core.settings import AgentContext
 from evals.judges import (
     JUDGE_NAMES,
     JudgeScore,
@@ -17,6 +18,7 @@ from evals.judges import (
 )
 from tests.fakes import FakeChatProvider
 from tools.eval_live_traffic import (
+    _scope_from_context,
     aggregate,
     build_run_payload,
     extract_turn,
@@ -152,6 +154,7 @@ def _good_state(text: str = "hello") -> dict[str, Any]:
     return {
         "messages": [HumanMessage(content=text), AIMessage(content="ok")],
         "rag_context": "some context",
+        "context": AgentContext(realm_id="demo-realm", user_id="u", agent_id="demo-agent"),
     }
 
 
@@ -196,6 +199,33 @@ def test_iter_recent_turns_respects_limit():
     assert len(turns) == 2
 
 
+def test_iter_recent_turns_scopes_to_realm_and_agent():
+    now = datetime.now(timezone.utc)
+    accepted = _good_state("accepted")
+    wrong_realm = _good_state("wrong realm")
+    wrong_realm["context"] = AgentContext(realm_id="other-realm", user_id="u", agent_id="demo-agent")
+    wrong_agent = _good_state("wrong agent")
+    wrong_agent["context"] = AgentContext(realm_id="demo-realm", user_id="u", agent_id="other-agent")
+    saver = _FakeSaver([
+        _FakeTuple(thread_id="t1", ts=_iso(now), channel_values=accepted),
+        _FakeTuple(thread_id="t2", ts=_iso(now), channel_values=wrong_realm),
+        _FakeTuple(thread_id="t3", ts=_iso(now), channel_values=wrong_agent),
+    ])
+    turns = list(iter_recent_turns(
+        saver, window_hours=24, limit=None, realm_id="demo-realm", agent_id="demo-agent",
+    ))
+    assert [turn["question"] for turn in turns] == ["accepted"]
+    assert turns[0]["realm_id"] == "demo-realm"
+    assert turns[0]["agent_id"] == "demo-agent"
+
+
+def test_scope_from_context_accepts_serialized_mapping_and_rejects_incomplete_context():
+    assert _scope_from_context({"context": {"realm_id": "r", "agent_id": "a"}}) == {
+        "realm_id": "r", "agent_id": "a",
+    }
+    assert _scope_from_context({"context": {"realm_id": "r"}}) is None
+
+
 def test_iter_recent_turns_skips_partial_states():
     now = datetime.now(timezone.utc)
     saver = _FakeSaver([
@@ -237,11 +267,13 @@ def test_aggregate_empty_input_returns_zero_means():
 
 
 def test_build_run_payload_shape():
-    payload = build_run_payload([], window_hours=24)
-    assert set(payload.keys()) == {"run_id", "run_at", "window_hours",
-                                   "n_turns", "scores", "per_turn"}
+    payload = build_run_payload([], window_hours=24, realm_id="demo-realm", agent_id="demo-agent")
+    assert set(payload.keys()) == {"run_id", "run_at", "realm_id", "agent_id",
+                                   "window_hours", "n_turns", "scores", "per_turn"}
     assert payload["window_hours"] == 24
     assert payload["n_turns"] == 0
+    assert payload["realm_id"] == "demo-realm"
+    assert payload["agent_id"] == "demo-agent"
     assert len(payload["run_id"]) == 32  # uuid4 hex
 
 

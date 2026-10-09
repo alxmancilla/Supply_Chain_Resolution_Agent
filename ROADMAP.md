@@ -98,6 +98,16 @@ the ones that don't apply at our scale.
 - **Files:** `agent/prompts.py`, `agent/nodes.py`, `tests/test_nodes.py`.
 - **Acceptance:** ✅ 9 new tests (per-branch inclusion / exclusion, whitespace-only drop, canonical ordering, base-only when empty, plan-over-routing precedence, no-routing fallback, end-to-end `generate_response` capture that asserts skipped-branch headers and payloads never reach the LLM); 218/218 pass.
 
+### 10. MongoDB automated agent-evaluation demo ✅
+- **Why:** A fixed eval baseline proves known cases still work, but a compelling operations demo needs to show how the same MongoDB deployment captures real agent execution state, automatically evaluates completed turns, retains quality history, and supports failure investigation.
+- **Scope (shipped):**
+  1. `tools/eval_live_traffic.py` now derives `realm_id` / `agent_id` from checkpointed `AgentContext`, filters turns before judging, accepts explicit scope overrides, and persists the ownership fields on every new `eval_runs` document. Incomplete or mismatched contexts are excluded rather than mixed across tenants.
+  2. `db/indexes.py` provisions `realm_id_1_agent_id_1_run_at_-1` alongside the global `run_at_-1` index; `evals/live_dashboard.py` provides independently testable, read-only scoped queries, weighted score summaries, trends, and low-score drill-down rows.
+  3. The Streamlit inspector has an **Evaluation** tab with 1 / 7 / 30-day metrics, score history, and per-turn judge-rationale drill-down. It only reads persisted `eval_runs` and never invokes judges or writes agent data.
+  4. `tools/seed_eval_demo.py` provides an idempotent, clearly labeled synthetic dashboard fixture for rehearsal; the live evaluator remains the real checkpoint-to-judge demonstration path.
+- **Files:** `DEMO_MONGODB_AGENT_EVALUATION.md`, `tools/{eval_live_traffic,seed_eval_demo}.py`, `evals/live_dashboard.py`, `db/indexes.py`, `app.py`, `README.md`, `tests/test_{evals_live_traffic,eval_dashboard}.py`.
+- **Acceptance:** Scoped new runs cannot mix realm / agent records; dashboard presents only scoped history and low-score rationale; fixture is idempotent and marked synthetic; all tests run offline without Atlas or chat credentials.
+
 ## P3 — Deferred (not justified yet)
 
 - **Domain sub-agent hierarchy** — Only justified when a second vertical is added beyond logistics.
@@ -113,4 +123,6 @@ per-sentence citations on top without adding LLM calls or graph edges; P2.8
 extended LangGraph's existing HIL-resume primitive to in-place failure
 recovery (no new persistence, no new node). P2.9 finished the context-
 discipline audit by dropping skipped-branch sections entirely from the
-Writer prompt. P3 is on standby until product scope demands it.
+Writer prompt. P2.10 turns stored agent checkpoints and `eval_runs` into a
+tenant-scoped, dashboarded quality loop that is suitable for a MongoDB
+automation demo. P3 is on standby until product scope demands it.

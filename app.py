@@ -26,6 +26,7 @@ from agent.graph import find_retry_checkpoint, get_graph, retryable_failures
 from agent.memory import (
     DB_NAME,
     EPISODES_COLLECTION,
+    EVAL_RUNS_COLLECTION,
     KG_CARRIERS_COLLECTION,
     KG_LANES_COLLECTION,
     KG_SERVES_COLLECTION,
@@ -37,6 +38,7 @@ from agent.memory import (
 )
 from core.memory import reset_memory_cache
 from core.settings import AgentContext, get_settings
+from evals.live_dashboard import fetch_eval_runs, low_score_turns, summarize_runs, trend_rows
 
 _SETTINGS = get_settings()
 REALM_ID = _SETTINGS.realm_id
@@ -199,6 +201,17 @@ def _fetch_kg_slas() -> pd.DataFrame:
     return pd.DataFrame(
         rows,
         columns=["sla_id", "carrier_id", "lane_id", "surcharge_rate", "weight_threshold_lb", "transit_hours"],
+    )
+
+
+def _fetch_eval_runs(days: int) -> list[dict]:
+    """Read only this realm / agent's recent, persisted evaluation history."""
+    coll = get_mongo_client()[DB_NAME][EVAL_RUNS_COLLECTION]
+    return fetch_eval_runs(
+        coll,
+        realm_id=REALM_ID,
+        agent_id=AGENT_ID,
+        days=days,
     )
 
 
@@ -731,6 +744,81 @@ def _render_turn(turn: dict, index: int) -> None:
         _render_usage(turn.get("usage", {}))
 
 
+def _render_evaluation_dashboard() -> None:
+    """Render persisted LLM-as-a-judge results; never invokes judges or writes."""
+    st.caption(
+        f"Read-only quality history for realm `{REALM_ID}` · agent `{AGENT_ID}`. "
+        "Run `python -m tools.eval_live_traffic` after completing agent turns."
+    )
+    days = st.selectbox(
+        "Evaluation history", (1, 7, 30), index=1,
+        format_func=lambda value: f"Last {value} day{'s' if value != 1 else ''}",
+        key="eval_history_days",
+    )
+    try:
+        runs = _fetch_eval_runs(days)
+    except Exception as exc:
+        st.error(f"Could not read `eval_runs`: {type(exc).__name__}: {exc}")
+        return
+    if not runs:
+        st.info(
+            "No scoped evaluation runs yet. Complete a few agent turns, then run "
+            "`python -m tools.eval_live_traffic --window-hours 24`."
+        )
+        return
+
+    summary = summarize_runs(runs)
+    counts = st.columns(2)
+    counts[0].metric("Evaluation runs", summary["n_runs"])
+    counts[1].metric("Turn samples", summary["n_turn_samples"])
+    cards = st.columns(3)
+    labels = {
+        "faithfulness": "Faithfulness",
+        "answer_relevancy": "Answer relevancy",
+        "context_relevancy": "Context relevancy",
+    }
+    for col, name in zip(cards, ("faithfulness", "answer_relevancy", "context_relevancy")):
+        judge = summary["judges"][name]
+        col.metric(labels[name], f"{judge['mean']:.3f}", help=f"Weighted across {judge['n']} judged turns.")
+
+    trend = trend_rows(runs)
+    with st.expander("Score history", expanded=True):
+        frame = pd.DataFrame(trend)
+        st.line_chart(frame.set_index("run_at")[["faithfulness", "answer_relevancy", "context_relevancy"]])
+        st.dataframe(frame, hide_index=True, use_container_width=True, height=180)
+
+    low_turns = low_score_turns(runs)
+    with st.expander("Lowest-scoring turns — drill down", expanded=True):
+        if not low_turns:
+            st.caption("No per-turn judge records were stored in this window.")
+            return
+        rows = pd.DataFrame([
+            {
+                "lowest_score": item["lowest_score"],
+                "weakest_judge": item["weakest_judge"],
+                "question": item["question"],
+                "thread_id": item["thread_id"],
+                "run_at": item["run_at"],
+            }
+            for item in low_turns
+        ])
+        st.dataframe(rows, hide_index=True, use_container_width=True, height=200)
+        for item in low_turns:
+            with st.expander(
+                f"{item['lowest_score']:.3f} · {item['weakest_judge']} · "
+                f"{item['thread_id'] or 'unknown thread'}",
+                expanded=False,
+            ):
+                st.caption(
+                    f"Run `{item['run_id']}` · checkpoint `{item['checkpoint_ts']}` · "
+                    f"{item['context_chunks']} context chunks"
+                )
+                st.markdown(f"**Question:** {item['question'] or '—'}")
+                st.markdown(f"**Answer preview:** {item['answer_preview'] or '—'}")
+                st.markdown(f"**Judge rationale:** {item['reason'] or '—'}")
+                st.json(item["scores"])
+
+
 def _render_demo_sidebar() -> None:
     pending = bool(st.session_state.get("pending_approval"))
     with st.sidebar:
@@ -795,8 +883,8 @@ def main() -> None:
     with right:
         st.subheader("🧠 Long-Term Memory Inspector")
         st.caption(f"Namespace: `{REALM_ID}` / `{USER_ID}` — refreshed every turn")
-        tab_sem, tab_epi, tab_proc, tab_kg = st.tabs(
-            ["Semantic", "Episodic", "Procedural", "Knowledge Graph"]
+        tab_sem, tab_epi, tab_proc, tab_kg, tab_eval = st.tabs(
+            ["Semantic", "Episodic", "Procedural", "Knowledge Graph", "Evaluation"]
         )
 
         with tab_sem:
@@ -837,6 +925,9 @@ def main() -> None:
                 st.dataframe(_fetch_kg_serves(), hide_index=True, use_container_width=True, height=220)
                 st.markdown("**SLAs** (per carrier × lane)")
                 st.dataframe(_fetch_kg_slas(), hide_index=True, use_container_width=True, height=260)
+
+        with tab_eval:
+            _render_evaluation_dashboard()
 
 
 if __name__ == "__main__":

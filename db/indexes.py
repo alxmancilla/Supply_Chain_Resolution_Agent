@@ -194,22 +194,26 @@ def ensure_kg_indexes() -> None:
 
 
 def ensure_eval_runs_index() -> None:
-    """Provision the `eval_runs` collection + a descending index on `run_at`.
+    """Provision `eval_runs` indexes for global and tenant-scoped time windows.
 
-    Backs the dashboard query "last 7 days of live-traffic judge scores"
-    written by `tools.eval_live_traffic`.
+    The compound index backs the dashboard's realm / agent filter before its
+    last-N-days range query. The simple index remains for operations over every
+    evaluation run and for legacy records created before scope metadata.
     """
     db = get_mongo_client()[DB_NAME]
     if EVAL_RUNS_COLLECTION not in db.list_collection_names():
         db.create_collection(EVAL_RUNS_COLLECTION)
     coll = db[EVAL_RUNS_COLLECTION]
-    idx_name = "run_at_-1"
     existing = {ix["name"] for ix in coll.list_indexes()}
-    if idx_name in existing:
-        print(f"[{EVAL_RUNS_COLLECTION}] '{idx_name}' already exists — skipping.")
-        return
-    coll.create_index([("run_at", -1)], name=idx_name)
-    print(f"[{EVAL_RUNS_COLLECTION}] created index '{idx_name}'.")
+    for idx_name, keys in {
+        "run_at_-1": [("run_at", -1)],
+        "realm_id_1_agent_id_1_run_at_-1": [("realm_id", 1), ("agent_id", 1), ("run_at", -1)],
+    }.items():
+        if idx_name in existing:
+            print(f"[{EVAL_RUNS_COLLECTION}] '{idx_name}' already exists — skipping.")
+            continue
+        coll.create_index(keys, name=idx_name)
+        print(f"[{EVAL_RUNS_COLLECTION}] created index '{idx_name}'.")
 
 
 def main() -> None:

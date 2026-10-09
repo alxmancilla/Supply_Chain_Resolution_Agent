@@ -361,6 +361,7 @@ produced.
 python -m tools.eval_live_traffic                                  # last 24h → eval_runs
 python -m tools.eval_live_traffic --window-hours 24 --limit 50     # cap turns scored
 python -m tools.eval_live_traffic --dry-run --out /tmp/run.json    # don't write to Atlas
+python -m tools.seed_eval_demo --dry-run                           # preview dashboard rehearsal fixture
 ```
 
 Walks `MongoDBSaver.list(None)` newest-first, dedupes to one terminal
@@ -369,8 +370,19 @@ checkpoint per `thread_id` inside the window, extracts the last
 `channel_values`, and runs three judges per turn — Faithfulness,
 Answer Relevancy, Context Relevancy. Writes a single `eval_runs`
 document with per-judge `{mean, n}` plus full per-turn detail and
-also prints it to stdout. A `run_at_-1` index (created by
-`python -m db.indexes`) backs the last-7-days dashboard query.
+also prints it to stdout. Each new run is scoped to the configured `realm_id`
+and `agent_id`; `--realm-id` / `--agent-id` override those defaults for an
+explicitly scoped batch. `db.indexes` provisions both `run_at_-1` and the
+compound `realm_id_1_agent_id_1_run_at_-1` index.
+
+The Streamlit memory inspector's **Evaluation** tab reads this persisted
+history only — it never invokes judges or writes agent data. Pick a 1 / 7 /
+30-day window to see weighted judge-score cards, per-run trends, and a
+low-score drill-down with the thread reference and judge rationale. For a
+repeatable UI rehearsal before traffic exists, `python -m tools.seed_eval_demo`
+upserts one clearly labeled `demo_fixture: true` run for the configured scope;
+use `tools.eval_live_traffic` to demonstrate the real checkpoint-to-judge flow.
+See `DEMO_MONGODB_AGENT_EVALUATION.md` for the 7–10 minute presenter script.
 
 ### Unit tests
 

@@ -37,6 +37,7 @@ from agent.memory import (
 )
 from core.protocols import ChatProvider
 from core.providers.registry import get_chat_provider
+from core.settings import get_settings
 from evals.judges import JUDGE_NAMES, JudgeScore, run_all
 
 _CONTEXT_CHANNELS = (
@@ -80,7 +81,34 @@ def extract_turn(channel_values: dict[str, Any]) -> dict[str, Any] | None:
     return {"question": question, "answer": answer, "context": context_chunks}
 
 
-def iter_recent_turns(saver, *, window_hours: int, limit: int | None) -> Iterable[dict[str, Any]]:
+def _scope_from_context(channel_values: dict[str, Any]) -> dict[str, str] | None:
+    """Return tenant ownership from a checkpointed AgentContext, if complete.
+
+    Checkpoints are serialized across LangGraph versions, so tolerate either a
+    dataclass-like context object or a mapping. Incomplete contexts are never
+    eligible for a scoped evaluation run — silently mixing tenant data would be
+    worse than leaving an old checkpoint unevaluated.
+    """
+    context = channel_values.get("context")
+    if isinstance(context, dict):
+        realm_id = context.get("realm_id")
+        agent_id = context.get("agent_id")
+    else:
+        realm_id = getattr(context, "realm_id", None)
+        agent_id = getattr(context, "agent_id", None)
+    if not (isinstance(realm_id, str) and realm_id and isinstance(agent_id, str) and agent_id):
+        return None
+    return {"realm_id": realm_id, "agent_id": agent_id}
+
+
+def iter_recent_turns(
+    saver,
+    *,
+    window_hours: int,
+    limit: int | None,
+    realm_id: str | None = None,
+    agent_id: str | None = None,
+) -> Iterable[dict[str, Any]]:
     """Yield one extracted turn per thread_id, newest first, within the window.
 
     `MongoDBSaver.list(config=None)` returns checkpoints newest-first; we
@@ -102,11 +130,19 @@ def iter_recent_turns(saver, *, window_hours: int, limit: int | None) -> Iterabl
         if not thread_id or thread_id in seen_threads:
             continue
         seen_threads.add(thread_id)
-        turn = extract_turn(tup.checkpoint.get("channel_values") or {})
+        channel_values = tup.checkpoint.get("channel_values") or {}
+        scope = _scope_from_context(channel_values)
+        if realm_id is not None and (scope is None or scope["realm_id"] != realm_id):
+            continue
+        if agent_id is not None and (scope is None or scope["agent_id"] != agent_id):
+            continue
+        turn = extract_turn(channel_values)
         if turn is None:
             continue
         turn["thread_id"] = thread_id
         turn["checkpoint_ts"] = ts_raw
+        if scope is not None:
+            turn.update(scope)
         yield turn
         yielded += 1
         if limit is not None and yielded >= limit:
@@ -134,10 +170,18 @@ def aggregate(per_turn: list[dict[str, Any]]) -> dict[str, dict[str, float | int
     return out
 
 
-def build_run_payload(per_turn: list[dict[str, Any]], *, window_hours: int) -> dict[str, Any]:
+def build_run_payload(
+    per_turn: list[dict[str, Any]],
+    *,
+    window_hours: int,
+    realm_id: str,
+    agent_id: str,
+) -> dict[str, Any]:
     return {
         "run_id": uuid.uuid4().hex,
         "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "realm_id": realm_id,
+        "agent_id": agent_id,
         "window_hours": window_hours,
         "n_turns": len(per_turn),
         "scores": aggregate(per_turn),
@@ -166,6 +210,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="How far back to look in `checkpoints` (default 24).")
     parser.add_argument("--limit", type=int, default=None,
                         help="Max number of turns to score (default: all in window).")
+    settings = get_settings()
+    parser.add_argument("--realm-id", default=settings.realm_id,
+                        help="Tenant realm to evaluate (default: REALM_ID setting).")
+    parser.add_argument("--agent-id", default=settings.agent_id,
+                        help="Agent to evaluate (default: AGENT_ID setting).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the JSON payload but do not insert into eval_runs.")
     parser.add_argument("--out", default=None,
@@ -174,9 +223,20 @@ def main(argv: list[str] | None = None) -> int:
 
     saver = get_checkpointer()
     chat = get_chat_provider()
-    turns = list(iter_recent_turns(saver, window_hours=args.window_hours, limit=args.limit))
+    turns = list(iter_recent_turns(
+        saver,
+        window_hours=args.window_hours,
+        limit=args.limit,
+        realm_id=args.realm_id,
+        agent_id=args.agent_id,
+    ))
     per_turn = score_turns(chat, turns)
-    payload = build_run_payload(per_turn, window_hours=args.window_hours)
+    payload = build_run_payload(
+        per_turn,
+        window_hours=args.window_hours,
+        realm_id=args.realm_id,
+        agent_id=args.agent_id,
+    )
 
     if not args.dry_run:
         get_mongo_client()[DB_NAME][EVAL_RUNS_COLLECTION].insert_one(dict(payload))
