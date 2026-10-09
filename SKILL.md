@@ -3,8 +3,8 @@ name: langgraph-mongodb-agent
 description: Opinionated blueprint for production-style stateful agents on LangGraph 1.x + MongoDB Atlas, with parallel retrieval, per-node resilience, HIL approval, and tenant scoping. Apply whenever the user asks to build, create, design, or scaffold a new agent (agent architecture, memory layers, RAG over Atlas, knowledge graph + agent, procedural rules, human-in-the-loop approval, multi-tenant agents, tool/action planning) and has not pinned a different stack.
 license: MIT
 metadata:
-  version: 0.3.0
-  last_updated: 2026-06-23
+  version: 0.3.1
+  last_updated: 2026-07-05
   source_repo: https://github.com/alxmancilla/Supply_Chain_Resolution_Agent
 ---
 
@@ -47,11 +47,11 @@ Examples below (`BookingProposal`, `booking_drafts`, `kg_carriers` / `kg_lanes`,
 | Storage / Search | MongoDB Atlas, one cluster | Vector Search for embeddings, b-tree for KG joins, `$graphLookup` for traversals, optional `$search` (BM25) for hybrid retrieval on the RAG corpus. |
 | Embeddings | `voyageai==0.4.0`, model `voyage-4` (1024 dim) | Expose `embed_query(text)` and `embed_documents(texts)` as **separate** methods on `EmbeddingProvider`; the Voyage call sets `input_type="query"` for the former and `input_type="document"` for the latter so the retrieval-tuned variant runs on each side of the search. **Do not** depend on `langchain-voyageai` (Python version gating bug). |
 | Rerank (RAG only) | `voyageai` cross-encoder, model `rerank-2-lite` | Gated on `RAG_RERANK_ENABLED`; `NullReranker` (identity, trim-to-k) is the default. Production deployments enable Voyage rerank; rerank only the RAG branch, never KG / LTM / episodes / procedures. |
-| Chat | OpenAI-compatible via `langchain-openai>=1.0` | Other backends go in `core/providers/chat/`. |
+| Chat | `GroveChatProvider` (Grove gateway → `gpt-5.5`) via `langchain-openai>=1.0` HTTP client | Grove speaks OpenAI wire protocol with an `api-key` header instead of Bearer auth. Additional backends drop into `core/providers/chat/` and register in `core/providers/registry.py::_build_chat_provider`; extend `CHAT_PROVIDERS` (the allowlist in `core/settings.py`) before wiring a new name. |
 | UI | Streamlit | Token streaming, per-turn latency, retrieved-chunk inspector, degraded-state banner. |
 | Telemetry | OpenTelemetry (optional, `OTEL_ENABLED=1`) | OTLP endpoint configurable. |
 | Tests | `pytest` with in-memory fakes for Atlas, embeddings, chat | The suite must run offline with zero credentials. |
-| Evals | `evals/runner.py` with a JSON baseline and `--score-tolerance` / `--latency-factor` regression guards | Live calls; re-capture baseline after any prompt-assembly, Reviewer, or retry-helper change. |
+| Evals | `evals/runner.py` (baseline gate) **plus** `tools/eval_live_traffic.py` + `evals/judges.py` (LLM-as-judge over checkpointed live turns, writes to `eval_runs`) | Baseline runner has `--score-tolerance` / `--latency-factor` regression guards; live-traffic pass runs `judge_faithfulness` / `judge_answer_relevancy` / `judge_context_relevancy` on the newest terminal checkpoint per `thread_id` inside a rolling window. Re-capture the baseline after any prompt-assembly, Reviewer, or retry-helper change. |
 | Settings | Frozen `@dataclass` in `core/settings.py`, env-var-driven, read once via `@lru_cache get_settings()` | All tunables (model ids, prices, retry budgets, feature flags) live here; nodes never read `os.environ` directly. |
 | Python | `>=3.11` | Tested on 3.13 and 3.14. The earlier `<3.14` cap was a `langchain-voyageai` workaround; the `voyageai` SDK has no such gate. |
 
@@ -185,11 +185,12 @@ Grouped by concern. Each rule has a short rationale followed by a normalized min
 | `agent_procedures` | mutable (status: `active` / `rejected` / `superseded`) | `(realm_id, agent_id)` | Approved rules only; promotion happens on `interrupt()` resume. |
 | `procedure_proposals` | append-only | `(realm_id, agent_id)` | Pending rules awaiting HIL approval; never mutate the row itself. |
 | `knowledge_corpus` | mutable on re-ingest | `(realm_id)` | RAG chunks; carry `source` filename so the citation validator can match. |
-| `kg_*` (one per node type, one per edge type — e.g. `kg_carriers`, `kg_lanes`) | mutable on re-seed | `(realm_id, agent_id)` | b-tree joins + `$graphLookup` traversals. |
+| `kg_*` (one per node type, one per edge type — in this repo: `kg_carriers`, `kg_lanes`, `kg_slas`, `kg_serves`) | mutable on re-seed | `(realm_id, agent_id)` | b-tree joins + `$graphLookup` traversals. |
 | `booking_drafts` | mutable upsert keyed by deterministic `draft_id` | `(realm_id, user_id)` | Carries `correlation_id` so HIL approval ties back to the originating turn. |
 | `agent_registry` | mutable | `(realm_id, agent_id)` | Per-deployment config (model ids, feature flags, prompt overrides). |
+| `eval_runs` | append-only | `(realm_id, agent_id)` | One document per live-traffic judge pass (`run_id`, `run_at`, `window_hours`, `n_turns`, per-judge `{mean, n}`, `per_turn` list). Backs the "last 7 days of judge scores" dashboard via a descending `run_at` index. |
 
-Vector indexes: `agent_memories_vector`, `knowledge_corpus_vector` (named consistently as `<collection>_vector`). Bootstrap via a dedicated `db/indexes.py` module that is idempotent (`_index_exists()` check before create). Apply a TTL index on `checkpoints` (or run a scheduled compactor) if cost matters — checkpoints grow per turn forever otherwise.
+Vector indexes: `agent_memories_vector`, `agent_episodes_vector`, `knowledge_corpus_vector` (named consistently as `<collection>_vector`). Bootstrap via a dedicated `db/indexes.py` module that is idempotent (`_index_exists()` check before create). `agent_memories_vector` and `agent_episodes_vector` are auto-created by `MongoDBStore` on first `get_store()` / `get_episodes_store()` call; `knowledge_corpus_vector`, `knowledge_corpus_search` (BM25), the four `kg_*` b-tree indexes, and `eval_runs.run_at_-1` are provisioned explicitly by `db/indexes.py::main`. Apply a TTL index on `checkpoints` (or run a scheduled compactor) if cost matters — checkpoints grow per turn forever otherwise.
 
 ## Production hardening (best practices)
 
@@ -213,7 +214,7 @@ These are non-optional once the agent leaves the demo box. Add them to the test 
 
 ## Quality bar (do not ship without)
 
-- ≥ 100 unit tests with in-memory fakes — suite runs in seconds without Atlas, Voyage, or chat credentials.
+- ≥ 200 unit tests with in-memory fakes — suite runs in seconds without Atlas, Voyage, or chat credentials. (Current reference implementation: 218 tests across 10 files.)
 - Tests for every retriever's degraded path, the citation validator + per-sentence binder, the reset-reducer, the interrupt/resume flow, the failure→retry helper that maps degraded markers to checkpointed nodes, the structured-output retry helper (success, malformed-then-recover, exhaustion, composition through the fallback chain, marker emission), the cross-provider fallback chain (retryable→advance, non-retryable→short-circuit, exhausted-chain error, `chat_fallback:<provider>` marker), the Reviewer skip paths + revise/approve paths when `REVIEW_DRAFT_ENABLED=1`, the context-discipline assembler (skipped-branch and empty-payload omission), the RAG retriever's rerank path (`NullReranker` identity ordering, `VoyageReranker` score replacement, over-fetch to `RAG_FUSION_CANDIDATES`, rerank only on the RAG branch), the KG `$graphLookup` pipeline (`maxDepth=1` cap, `restrictSearchWithMatch` tenant filter, hop-1/hop-2 tagging, `_apply_constraints` keeping hop-2 only for surviving carriers), the vector-dim preflight (match / mismatch / missing / unsupported), and the embedding-provider split (`embed_query` vs `embed_documents` calling Voyage with `input_type="query"` vs `"document"`).
 - A live eval suite (`evals/runner.py`) with a baseline file and `--score-tolerance` / `--latency-factor` regression guards. Re-capture the baseline whenever prompt assembly, the Reviewer toggle, or the retry helpers change — token counts and latency shift.
 - A `db/indexes.py` bootstrapper documented in the README; missing indexes cause silent zero-hit retrieval — always provision explicitly.
