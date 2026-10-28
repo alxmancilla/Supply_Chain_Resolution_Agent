@@ -103,7 +103,9 @@ remembers user preferences across sessions.
   Answer Relevancy (does the reply address the question), Context
   Relevancy (is retrieved context on-topic). Per-judge means + every
   per-turn detail land in a single `eval_runs` document, suitable for
-  a cron / GitHub Action and a 7-day dashboard.
+  a cron / GitHub Action and a 7-day dashboard. With explicit
+  `--publish-langfuse`, the same three scores are mirrored to the correlated
+  Langfuse trace; Atlas remains the audit record.
 - **Eval harness with a baseline gate.** `python -m evals.runner` scores
   four suites (intent accuracy, RAG recall, KG row-match, and action
   planning) and exits non-zero if any score drops vs. the committed
@@ -361,6 +363,7 @@ produced.
 python -m tools.eval_live_traffic                                  # last 24h → eval_runs
 python -m tools.eval_live_traffic --window-hours 24 --limit 50     # cap turns scored
 python -m tools.eval_live_traffic --dry-run --out /tmp/run.json    # don't write to Atlas
+python -m tools.eval_live_traffic --publish-langfuse               # also mirror scores to Langfuse
 python -m tools.seed_eval_demo --dry-run                           # preview dashboard rehearsal fixture
 ```
 
@@ -374,6 +377,17 @@ also prints it to stdout. Each new run is scoped to the configured `realm_id`
 and `agent_id`; `--realm-id` / `--agent-id` override those defaults for an
 explicitly scoped batch. `db.indexes` provisions both `run_at_-1` and the
 compound `realm_id_1_agent_id_1_run_at_-1` index.
+
+### Optional Langfuse tracing
+
+Set `LANGFUSE_ENABLED=1`, `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, and
+`LANGFUSE_SECRET_KEY` in `.env` to trace Streamlit turns and correlate each
+trace with the checkpointed `AgentContext.correlation_id`. Content capture is
+off by default; enable it only for approved non-sensitive data with
+`LANGFUSE_CAPTURE_CONTENT=1`. This also enables the native LangGraph callback,
+which nests graph steps and individual LangChain model generations under the
+turn trace. Score publishing is always opt-in via
+`--publish-langfuse` and is disabled by `--dry-run`.
 
 The Streamlit memory inspector's **Evaluation** tab reads this persisted
 history only — it never invokes judges or writes agent data. Pick a 1 / 7 /

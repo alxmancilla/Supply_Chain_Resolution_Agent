@@ -35,6 +35,7 @@ from agent.memory import (
     get_checkpointer,
     get_mongo_client,
 )
+from core.langfuse import publish_evaluation_scores
 from core.protocols import ChatProvider
 from core.providers.registry import get_chat_provider
 from core.settings import get_settings
@@ -101,6 +102,13 @@ def _scope_from_context(channel_values: dict[str, Any]) -> dict[str, str] | None
     return {"realm_id": realm_id, "agent_id": agent_id}
 
 
+def _correlation_id_from_context(channel_values: dict[str, Any]) -> str | None:
+    """Return the checkpointed correlation ID used as the Langfuse join key."""
+    context = channel_values.get("context")
+    value = context.get("correlation_id") if isinstance(context, dict) else getattr(context, "correlation_id", None)
+    return value if isinstance(value, str) and value else None
+
+
 def iter_recent_turns(
     saver,
     *,
@@ -141,6 +149,9 @@ def iter_recent_turns(
             continue
         turn["thread_id"] = thread_id
         turn["checkpoint_ts"] = ts_raw
+        correlation_id = _correlation_id_from_context(channel_values)
+        if correlation_id is not None:
+            turn["correlation_id"] = correlation_id
         if scope is not None:
             turn.update(scope)
         yield turn
@@ -196,6 +207,7 @@ def score_turns(chat: ChatProvider, turns: Iterable[dict[str, Any]]) -> list[dic
         per_turn.append({
             "thread_id": turn.get("thread_id"),
             "checkpoint_ts": turn.get("checkpoint_ts"),
+            "correlation_id": turn.get("correlation_id"),
             "question": turn["question"],
             "answer_preview": turn["answer"][:240],
             "context_chunks": len(turn["context"]),
@@ -217,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Agent to evaluate (default: AGENT_ID setting).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the JSON payload but do not insert into eval_runs.")
+    parser.add_argument("--publish-langfuse", action="store_true",
+                        help="Also publish judge scores to correlated Langfuse traces (never with --dry-run).")
     parser.add_argument("--out", default=None,
                         help="Optional path to also write the JSON payload to disk.")
     args = parser.parse_args(argv)
@@ -237,6 +251,13 @@ def main(argv: list[str] | None = None) -> int:
         realm_id=args.realm_id,
         agent_id=args.agent_id,
     )
+
+    if args.publish_langfuse and not args.dry_run:
+        publish_evaluation_scores(
+            payload["per_turn"], run_id=payload["run_id"], settings=settings,
+        )
+    elif args.publish_langfuse:
+        print("--dry-run prevents Langfuse score publishing.", file=sys.stderr)
 
     if not args.dry_run:
         get_mongo_client()[DB_NAME][EVAL_RUNS_COLLECTION].insert_one(dict(payload))

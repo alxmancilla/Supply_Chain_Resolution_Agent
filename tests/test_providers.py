@@ -459,6 +459,7 @@ def test_plan_booking_emits_structured_retry_marker_when_retried(monkeypatch):
         ],
         "context": AgentContext(realm_id="r", user_id="u", agent_id="a"),
         "routing": {"intent_label": "recommend_shipment", "branches": ["rag"]},
+        "citations": [{"source": "route_guides/tx_az.pdf"}],
     }
     out = nodes.plan_booking(state)
     assert out["action_plan"]["action_type"] == "create_booking_draft"
@@ -485,6 +486,7 @@ def test_plan_booking_emits_structured_failed_marker_when_exhausted(monkeypatch)
         ],
         "context": AgentContext(realm_id="r", user_id="u", agent_id="a"),
         "routing": {"intent_label": "recommend_shipment", "branches": ["rag"]},
+        "citations": [{"source": "route_guides/tx_az.pdf"}],
     }
     out = nodes.plan_booking(state)
     assert out["action_plan"] == {"action_type": "none"}

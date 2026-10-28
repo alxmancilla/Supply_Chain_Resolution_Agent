@@ -217,6 +217,7 @@ def test_iter_recent_turns_scopes_to_realm_and_agent():
     assert [turn["question"] for turn in turns] == ["accepted"]
     assert turns[0]["realm_id"] == "demo-realm"
     assert turns[0]["agent_id"] == "demo-agent"
+    assert turns[0]["correlation_id"] == accepted["context"].correlation_id
 
 
 def test_scope_from_context_accepts_serialized_mapping_and_rejects_incomplete_context():
@@ -291,6 +292,7 @@ def test_score_turns_emits_one_record_per_turn_with_all_judges():
     assert len(per_turn) == 1
     rec = per_turn[0]
     assert rec["thread_id"] == "t1"
+    assert rec["correlation_id"] is None
     assert rec["context_chunks"] == 1
     assert set(rec["scores"].keys()) == set(JUDGE_NAMES)
     assert rec["scores"]["faithfulness"]["score"] == 0.9

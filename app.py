@@ -36,6 +36,12 @@ from agent.memory import (
     get_mongo_client,
     memory_namespace,
 )
+from core.langfuse import (
+    complete_agent_turn,
+    trace_agent_turn,
+    trace_id_for,
+    with_langfuse_callbacks,
+)
 from core.memory import reset_memory_cache
 from core.settings import AgentContext, get_settings
 from evals.live_dashboard import fetch_eval_runs, low_score_turns, summarize_runs, trend_rows
@@ -233,6 +239,8 @@ def _finalize_turn(user_input: str, result: dict, interrupts: list[dict]) -> Non
         if isinstance(msg, AIMessage):
             ai_message = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
+    context = result.get("context")
+    correlation_id = getattr(context, "correlation_id", None)
     st.session_state.turns.append(
         {
             "user": user_input,
@@ -251,12 +259,14 @@ def _finalize_turn(user_input: str, result: dict, interrupts: list[dict]) -> Non
             "degraded": result.get("degraded", []),
             "routing": result.get("routing", {}),
             "citations": result.get("citations", []),
+            "correlation_id": correlation_id,
+            "langfuse_trace_id": trace_id_for(correlation_id) if correlation_id else None,
             "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
         }
     )
 
 
-def _drive_turn(payload, *, user_input: str, prior_interrupts: list[dict]) -> None:
+def _drive_turn(payload, *, user_input: str, prior_interrupts: list[dict], trace_context: AgentContext) -> None:
     """Stream until completion or until an interrupt fires.
 
     On interrupt: stash mid-turn state in `session_state.pending_approval`
@@ -269,7 +279,24 @@ def _drive_turn(payload, *, user_input: str, prior_interrupts: list[dict]) -> No
     stream_box = st.empty()
     stream_box.markdown("_streaming…_")
     buffer: list[str] = []
-    result = _stream_invocation(graph, payload, config, stream_box, buffer)
+    invocation = "initial" if isinstance(payload, dict) else "approval_resume"
+    with trace_agent_turn(
+        settings=_SETTINGS,
+        context=trace_context,
+        thread_id=st.session_state.thread_id,
+        user_input=user_input,
+        invocation=invocation,
+    ) as trace:
+        traced_config = with_langfuse_callbacks(
+            config,
+            trace=trace,
+            settings=_SETTINGS,
+            run_name=f"{invocation}-agent-turn",
+        )
+        result = _stream_invocation(graph, payload, traced_config, stream_box, buffer)
+        complete_agent_turn(
+            trace, result, interrupted=bool(result.get("__interrupt__")), settings=_SETTINGS,
+        )
     interrupts = list(prior_interrupts)
     if result.get("__interrupt__"):
         intr = result["__interrupt__"][0]
@@ -280,6 +307,7 @@ def _drive_turn(payload, *, user_input: str, prior_interrupts: list[dict]) -> No
             "interrupts": interrupts,
             "request": payload_value,
             "partial_reply": "".join(buffer),
+            "trace_context": trace_context,
         }
         stream_box.empty()
         return
@@ -288,13 +316,15 @@ def _drive_turn(payload, *, user_input: str, prior_interrupts: list[dict]) -> No
 
 
 def _run_turn(user_input: str) -> None:
+    context = AgentContext.from_settings(_SETTINGS)
     _drive_turn(
         {
             "messages": [HumanMessage(content=user_input)],
-            "context": AgentContext.from_settings(_SETTINGS),
+            "context": context,
         },
         user_input=user_input,
         prior_interrupts=[],
+        trace_context=context,
     )
 
 
@@ -304,9 +334,14 @@ def _resume_turn(*, approved: bool, approver: str) -> None:
         return
     st.session_state.pending_approval = None
     _drive_turn(
-        Command(resume={"approved": approved, "approver": approver}),
+        Command(resume={
+            "approved": approved,
+            "approver": approver,
+            "approver_role": _SETTINGS.user_role,
+        }),
         user_input=pending["user_input"],
         prior_interrupts=pending["interrupts"],
+        trace_context=pending.get("trace_context") or AgentContext.from_settings(_SETTINGS),
     )
 
 
@@ -334,7 +369,28 @@ def _retry_from_node(turn_index: int, target_node: str) -> None:
     stream_box = st.empty()
     stream_box.markdown(f"_retrying from `{target_node}`…_")
     buffer: list[str] = []
-    result = _stream_invocation(graph, None, anchor, stream_box, buffer)
+    correlation_id = turn.get("correlation_id")
+    trace_context = (
+        AgentContext(REALM_ID, USER_ID, AGENT_ID, correlation_id)
+        if isinstance(correlation_id, str) and correlation_id else None
+    )
+    with trace_agent_turn(
+        settings=_SETTINGS,
+        context=trace_context,
+        thread_id=st.session_state.thread_id,
+        user_input=turn["user"],
+        invocation="retry",
+    ) as trace:
+        traced_config = with_langfuse_callbacks(
+            anchor,
+            trace=trace,
+            settings=_SETTINGS,
+            run_name="retry-agent-node",
+        )
+        result = _stream_invocation(graph, None, traced_config, stream_box, buffer)
+        complete_agent_turn(
+            trace, result, interrupted=bool(result.get("__interrupt__")), settings=_SETTINGS,
+        )
     stream_box.empty()
     if result.get("__interrupt__"):
         intr = result["__interrupt__"][0]
@@ -344,6 +400,7 @@ def _retry_from_node(turn_index: int, target_node: str) -> None:
             "interrupts": [payload_value if isinstance(payload_value, dict) else {"value": payload_value}],
             "request": payload_value,
             "partial_reply": "".join(buffer),
+            "trace_context": trace_context,
         }
         return
     ai_message = ""

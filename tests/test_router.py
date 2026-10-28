@@ -206,13 +206,25 @@ def test_route_after_citations_picks_procedure_branch_for_propose_procedure():
 
 def test_route_after_citations_picks_booking_branch_for_actionable_intents():
     for intent in ("recommend_shipment", "fallback"):
-        state = {"routing": {"intent_label": intent}}
+        state = {
+            "routing": {"intent_label": intent},
+            "citations": [{"source": "route_guides/tx_az.pdf"}],
+        }
         assert _route_after_citations(state) == "plan_booking", intent
 
 
-def test_route_after_citations_defaults_to_booking_when_routing_missing():
-    assert _route_after_citations({}) == "plan_booking"
-    assert _route_after_citations({"routing": {}}) == "plan_booking"
+def test_route_after_citations_skips_booking_without_validated_evidence():
+    assert _route_after_citations({}) == "save_memory"
+    assert _route_after_citations({"routing": {}}) == "save_memory"
+
+
+def test_route_after_citations_skips_booking_when_evidence_is_insufficient():
+    state = {
+        "routing": {"intent_label": "recommend_shipment"},
+        "citations": [{"source": "route_guides/tx_az.pdf"}],
+        "degraded": ["evidence_insufficient"],
+    }
+    assert _route_after_citations(state) == "save_memory"
 
 
 def test_non_actionable_intents_cover_expected_labels():

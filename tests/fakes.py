@@ -173,14 +173,15 @@ class FakeProceduralMemory:
         ]
 
     def propose(self, realm_id, agent_id, *, rule, category="general", rationale="",
-                proposed_by=None, correlation_id=None):
+                proposed_by=None, proposed_by_role=None, correlation_id=None):
         from core.memory.procedural import _stable_rule_id
         rule_id = _stable_rule_id(rule)
         doc = {
             "proposal_id": rule_id, "rule_id": rule_id, "realm_id": realm_id,
             "agent_id": agent_id, "rule": rule.strip(), "category": category,
             "rationale": rationale, "status": "pending_approval",
-            "proposed_by": proposed_by, "correlation_id": correlation_id,
+            "proposed_by": proposed_by, "proposed_by_role": proposed_by_role,
+            "correlation_id": correlation_id,
         }
         self._proposals = [
             p for p in self._proposals
@@ -191,7 +192,7 @@ class FakeProceduralMemory:
         self.proposed.append(doc)
         return doc
 
-    def commit(self, realm_id, agent_id, proposal_id, *, approver=None):
+    def commit(self, realm_id, agent_id, proposal_id, *, approver=None, approver_role=None):
         proposal = next(
             (p for p in self._proposals
              if p["realm_id"] == realm_id and p["agent_id"] == agent_id
@@ -205,6 +206,7 @@ class FakeProceduralMemory:
             "category": proposal.get("category", "general"),
             "realm_id": realm_id, "agent_id": agent_id, "active": True,
             "source_proposal_id": proposal_id, "approver": approver,
+            "approver_role": approver_role,
         }
         self._rules.append(rule_doc)
         proposal["status"] = "approved"
@@ -212,12 +214,13 @@ class FakeProceduralMemory:
         self.committed.append(rule_doc)
         return rule_doc
 
-    def reject(self, realm_id, agent_id, proposal_id, *, approver=None):
+    def reject(self, realm_id, agent_id, proposal_id, *, approver=None, approver_role=None):
         for p in self._proposals:
             if (p["realm_id"] == realm_id and p["agent_id"] == agent_id
                     and p["proposal_id"] == proposal_id):
                 p["status"] = "rejected"
                 p["approver"] = approver
+                p["approver_role"] = approver_role
                 self.rejected.append(p)
                 return
 

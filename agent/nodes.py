@@ -29,6 +29,7 @@ from core.memory import (
     get_procedural_memory,
     get_semantic_memory,
 )
+from core.memory.procedural_policy import ProceduralPolicyError
 from core.providers.chat.retry import invoke_typed_with_retry
 from core.providers.registry import get_chat_provider
 from core.rag.mongo import get_knowledge_retriever
@@ -678,12 +679,13 @@ def _citable_tokens_from(state: AgentState) -> list[str]:
 
 @timed("validate_ms")
 def validate_citations(state: AgentState) -> dict[str, Any]:
-    """Flag replies that don't cite any retrieved RAG / KG source.
+    """Validate source attribution for the response and action-policy gate.
 
     Skipped when the reply is empty or when no groundable sources were
     retrieved this turn (recall- or policy-only answers, or a fully
-    degraded retrieval phase). On violation, appends `"citations_missing"`
-    to `state['degraded']` without blocking the rest of the graph.
+    degraded retrieval phase). Missing citations never block the response;
+    the following action router consumes this node's result and prevents an
+    unsupported booking draft from being planned.
     """
     reply_text = ""
     for msg in reversed(state.get("messages") or []):
@@ -701,15 +703,32 @@ def validate_citations(state: AgentState) -> dict[str, Any]:
     if spans:
         out["citations"] = [dict(s) for s in spans]
     citable = _citable_tokens_from(state)
-    if not citable:
-        return out
-    haystack = reply_text.lower()
-    if not any(tok.lower() in haystack for tok in citable):
+    if citable and not any(tok.lower() in reply_text.lower() for tok in citable):
         out["degraded"] = ["citations_missing"]
     return out
 
 
 _NO_ACTION: dict[str, Any] = {"action_type": "none"}
+
+
+def booking_action_block_reason(state: AgentState) -> str | None:
+    """Return why a booking draft must not be planned, if anything.
+
+    A shipment recommendation remains visible even when evidence is weak,
+    but creating a durable booking draft requires validated RAG or KG
+    citation spans. The check also rejects turns that exhausted retrieval
+    without grounding evidence. This is deterministic policy rather than an
+    LLM-as-a-judge decision.
+    """
+    degraded = set(state.get("degraded") or [])
+    if "evidence_insufficient" in degraded:
+        return "evidence_insufficient"
+    if "citations_missing" in degraded:
+        return "citations_missing"
+    citations = state.get("citations") or []
+    if not citations:
+        return "missing_validated_citations"
+    return None
 
 
 _COST_NUMBER = r"\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?)"
@@ -779,6 +798,12 @@ def plan_booking(state: AgentState) -> dict[str, Any]:
     (`recommend_shipment`, `fallback`). Skipped entirely when the router
     classified the turn as non-actionable or as a procedure proposal.
     """
+    block_reason = booking_action_block_reason(state)
+    if block_reason:
+        return {
+            "action_plan": dict(_NO_ACTION),
+            "degraded": [f"action_blocked:{block_reason}"],
+        }
     user_text, agent_text = _last_user_and_agent_text(state["messages"])
     if not (user_text and agent_text):
         return {"action_plan": dict(_NO_ACTION)}
@@ -882,15 +907,27 @@ def _execute_procedure_proposal(state: AgentState, plan: dict[str, Any]) -> dict
     """
     ctx = state["context"]
     proc_mem = get_procedural_memory()
-    proposal_doc = proc_mem.propose(
-        ctx.realm_id,
-        ctx.agent_id,
-        rule=plan.get("rule") or "",
-        category=plan.get("category") or "general",
-        rationale=plan.get("rationale") or "",
-        proposed_by=getattr(ctx, "user_id", None),
-        correlation_id=getattr(ctx, "correlation_id", None),
-    )
+    try:
+        proposal_doc = proc_mem.propose(
+            ctx.realm_id,
+            ctx.agent_id,
+            rule=plan.get("rule") or "",
+            category=plan.get("category") or "general",
+            rationale=plan.get("rationale") or "",
+            proposed_by=getattr(ctx, "user_id", None),
+            proposed_by_role=getattr(ctx, "actor_role", None),
+            correlation_id=getattr(ctx, "correlation_id", None),
+        )
+    except ProceduralPolicyError as exc:
+        return {
+            "procedure_proposal": {
+                "rule": plan.get("rule") or "",
+                "category": plan.get("category") or "general",
+                "status": "blocked",
+                "reason": exc.reason,
+            },
+            "degraded": [f"procedure_blocked:{exc.reason}"],
+        }
     proposal_id = proposal_doc["proposal_id"]
     decision = interrupt(
         {
@@ -905,14 +942,42 @@ def _execute_procedure_proposal(state: AgentState, plan: dict[str, Any]) -> dict
     if isinstance(decision, dict):
         approved = bool(decision.get("approved"))
         approver = decision.get("approver")
+        approver_role = decision.get("approver_role") or getattr(ctx, "actor_role", None)
     else:
         approved = bool(decision)
         approver = None
+        approver_role = getattr(ctx, "actor_role", None)
     if approved:
-        proc_mem.commit(ctx.realm_id, ctx.agent_id, proposal_id, approver=approver)
+        try:
+            committed = proc_mem.commit(
+                ctx.realm_id,
+                ctx.agent_id,
+                proposal_id,
+                approver=approver,
+                approver_role=approver_role,
+            )
+        except ProceduralPolicyError as exc:
+            return {
+                "procedure_proposal": {
+                    "proposal_id": proposal_id,
+                    "rule_id": proposal_doc["rule_id"],
+                    "rule": proposal_doc["rule"],
+                    "category": proposal_doc.get("category", "general"),
+                    "status": "approval_blocked",
+                    "reason": exc.reason,
+                },
+                "degraded": [f"procedure_blocked:{exc.reason}"],
+            }
         status = "approved"
     else:
-        proc_mem.reject(ctx.realm_id, ctx.agent_id, proposal_id, approver=approver)
+        committed = None
+        proc_mem.reject(
+            ctx.realm_id,
+            ctx.agent_id,
+            proposal_id,
+            approver=approver,
+            approver_role=approver_role,
+        )
         status = "rejected"
     return {
         "procedure_proposal": {
@@ -923,6 +988,8 @@ def _execute_procedure_proposal(state: AgentState, plan: dict[str, Any]) -> dict
             "rationale": proposal_doc.get("rationale", ""),
             "status": status,
             "approver": approver,
+            "approver_role": approver_role,
+            "expires_at": committed.get("expires_at") if committed else None,
         }
     }
 

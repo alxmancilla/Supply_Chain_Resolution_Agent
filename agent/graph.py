@@ -39,6 +39,7 @@ from .nodes import (
     generate_response,
     plan_booking,
     plan_procedure,
+    booking_action_block_reason,
     reflect_on_evidence,
     retrieve_episodes,
     retrieve_kg,
@@ -100,14 +101,16 @@ def _route_after_citations(state: AgentState) -> str:
 
     Non-actionable intents jump straight to `save_memory`, skipping the
     action-planning LLM call and `execute_action` entirely. Procedure
-    proposals go to `plan_procedure`; everything else (recommend_shipment,
-    fallback, unknown) goes to `plan_booking`.
+    proposals go to `plan_procedure`; booking-capable intents proceed only
+    when citation validation produced grounded evidence.
     """
     intent = (state.get("routing") or {}).get("intent_label") or "fallback"
     if intent in _NON_ACTIONABLE_INTENTS:
         return "save_memory"
     if intent == "propose_procedure":
         return "plan_procedure"
+    if booking_action_block_reason(state):
+        return "save_memory"
     return "plan_booking"
 
 

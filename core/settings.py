@@ -56,6 +56,14 @@ def _env_provider_chain(name: str, allowed: tuple[str, ...]) -> tuple[str, ...]:
     return chain
 
 
+def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name, ",".join(default))
+    values = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+    if not values:
+        raise RuntimeError(f"{name} must contain at least one role")
+    return values
+
+
 @dataclass(frozen=True)
 class Settings:
     """Process-wide configuration. Loaded once from env."""
@@ -63,7 +71,12 @@ class Settings:
     mongodb_uri: str
     realm_id: str = "customer-tenant-001"
     user_id: str = "user-demo"
+    user_role: str = "operator"
     agent_id: str = "supply-chain-resolution-agent"
+    procedure_proposer_roles: tuple[str, ...] = ("operator", "admin")
+    procedure_approver_roles: tuple[str, ...] = ("operator", "admin")
+    procedure_max_rule_chars: int = 500
+    procedure_rule_ttl_days: int = 90
     embedding_provider: str = "voyage"
     chat_provider: str = "grove"
     chat_providers: tuple[str, ...] = ()
@@ -85,6 +98,12 @@ class Settings:
     structured_retry_max_attempts: int = 3
     review_draft_enabled: bool = False
     review_draft_min_chars: int = 200
+    langfuse_enabled: bool = False
+    langfuse_base_url: str = "http://localhost:3000"
+    langfuse_environment: str = "development"
+    langfuse_release: str = ""
+    langfuse_capture_content: bool = False
+    langfuse_capture_max_chars: int = 4000
 
 
 @lru_cache(maxsize=1)
@@ -99,7 +118,12 @@ def get_settings() -> Settings:
         mongodb_uri=_require_env("MONGODB_URI"),
         realm_id=os.environ.get("REALM_ID", "customer-tenant-001"),
         user_id=os.environ.get("USER_ID", "user-demo"),
+        user_role=os.environ.get("USER_ROLE", "operator").strip().lower(),
         agent_id=os.environ.get("AGENT_ID", "supply-chain-resolution-agent"),
+        procedure_proposer_roles=_env_csv("PROCEDURE_PROPOSER_ROLES", ("operator", "admin")),
+        procedure_approver_roles=_env_csv("PROCEDURE_APPROVER_ROLES", ("operator", "admin")),
+        procedure_max_rule_chars=int(os.environ.get("PROCEDURE_MAX_RULE_CHARS", "500")),
+        procedure_rule_ttl_days=int(os.environ.get("PROCEDURE_RULE_TTL_DAYS", "90")),
         embedding_provider=_env_choice("EMBEDDING_PROVIDER", "voyage", EMBEDDING_PROVIDERS),
         chat_provider=_env_choice("CHAT_PROVIDER", "grove", CHAT_PROVIDERS),
         chat_providers=_env_provider_chain("CHAT_PROVIDERS", CHAT_PROVIDERS),
@@ -121,6 +145,12 @@ def get_settings() -> Settings:
         structured_retry_max_attempts=int(os.environ.get("STRUCTURED_RETRY_MAX_ATTEMPTS", "3")),
         review_draft_enabled=_env_bool("REVIEW_DRAFT_ENABLED", False),
         review_draft_min_chars=int(os.environ.get("REVIEW_DRAFT_MIN_CHARS", "200")),
+        langfuse_enabled=_env_bool("LANGFUSE_ENABLED", False),
+        langfuse_base_url=os.environ.get("LANGFUSE_BASE_URL", "http://localhost:3000"),
+        langfuse_environment=os.environ.get("LANGFUSE_ENVIRONMENT", "development"),
+        langfuse_release=os.environ.get("LANGFUSE_RELEASE", ""),
+        langfuse_capture_content=_env_bool("LANGFUSE_CAPTURE_CONTENT", False),
+        langfuse_capture_max_chars=int(os.environ.get("LANGFUSE_CAPTURE_MAX_CHARS", "4000")),
     )
 
 
@@ -138,11 +168,17 @@ class AgentContext:
     user_id: str
     agent_id: str
     correlation_id: str = field(default_factory=lambda: uuid4().hex)
+    actor_role: str = "operator"
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> "AgentContext":
         s = settings or get_settings()
-        return cls(realm_id=s.realm_id, user_id=s.user_id, agent_id=s.agent_id)
+        return cls(
+            realm_id=s.realm_id,
+            user_id=s.user_id,
+            agent_id=s.agent_id,
+            actor_role=s.user_role,
+        )
 
 
 __all__ = ["Settings", "AgentContext", "get_settings"]

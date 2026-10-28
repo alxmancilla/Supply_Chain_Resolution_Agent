@@ -106,6 +106,7 @@ def test_plan_booking_emits_usage_from_chat_provider(monkeypatch, context):
     state = {
         "messages": [HumanMessage(content="ship 1000lbs"), AIMessage(content="recommend Carrier A")],
         "context": context,
+        "citations": [{"source": "route_guides/tx_az.pdf"}],
     }
     out = plan_booking(state)
     assert out["action_plan"]["action_type"] == "none"
